@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+# acme-hooked - a script to issue TLS certificates via ACME
 # Copyright (C) 2015-2021 The acme-hooked authors.
 # Licensed under the MIT license, see LICENSE.
 
