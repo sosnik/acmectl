@@ -45,7 +45,7 @@ remove()
 	domain="$1"
 	token="$2"
 	content="$3"
-	
+
 	# remove the challenges for the given domain
 }
 
