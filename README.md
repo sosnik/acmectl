@@ -27,8 +27,8 @@ the following improvements compared to the original acme-tiny:
 - acme-hooked supports processing of more than one CSR at once, without the need
   to register your account every time, like when running acme-tiny in a loop.
 
-- acme-hooked is able to handle both DNS-01 and HTTP-01 type ACME challenges.
-  acme-tiny was built for the HTTP-01 challenge only.
+- acme-hooked is able to handle both DNS-01 and HTTP-01 type ACME challenges
+  via its hook scripts. acme-tiny was built for the HTTP-01 challenge only.
 
 - acme-hooked still follows the acme-tiny core idea of having tiny, auditable
   code. It still contains well under 200 lines of actual code that has been
