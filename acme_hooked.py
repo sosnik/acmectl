@@ -27,8 +27,8 @@ def _do_hook(hook_list, cmd, argument_list, stdin=None, cmd_input=None, echo=Fal
     elif out:
         LOGGER.info(out.decode('utf8').rstrip("\n"))
 
-def get_crt(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None):
-    ret, requests, orders, directory, acct_headers, alg, jwk = [], [], [], None, None, None, None # global variables
+def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None):
+    crts, requests, orders, directory, acct_headers, alg, jwk = [], [], [], None, None, None, None # global variables
 
     # helper functions - base64 encode for jose spec
     def _b64(bytestring):
@@ -200,9 +200,11 @@ def get_crt(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTO
         # download the certificate
         certificate_pem, _, _ = _send_signed_request(order['certificate'], None, "Certificate download failed")
         LOGGER.info("Certificate signed for %s.", csrfile)
-        ret += [(csrfile, certificate_pem)]
+        crts += [(csrfile, certificate_pem)]
 
-    return ret
+    # output result via the hook scripts
+    for (csr, crt) in crts:
+        _do_hook(hook, 'write', [csr], stdin=subprocess.PIPE, cmd_input=crt.encode('utf8'), echo=True)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -232,12 +234,8 @@ def main(argv=None):
     challenge_type = 'http' if args.http_hook else 'dns'
     hook = [args.http_hook] if args.http_hook else [args.dns_hook]
 
-    # sign the csrs
-    crts = get_crt(args.account_key, args.csr, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact, hook=hook, challenge_type=challenge_type)
-
-    # output result via the hook scripts
-    for (csr, crt) in crts:
-        _do_hook(hook, 'write', [csr], stdin=subprocess.PIPE, cmd_input=crt.encode('utf8'), echo=True)
+    # sign the certificates in the CSRs
+    sign_crts(args.account_key, args.csr, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact, hook=hook, challenge_type=challenge_type)
 
 if __name__ == "__main__": # pragma: no cover
     main(sys.argv[1:])
