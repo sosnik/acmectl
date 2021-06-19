@@ -7,14 +7,32 @@ SSL](https://www.buypass.com/ssl/products/acme)) based on the superb
 [acme-tiny](https://github.com/diafygi/acme-tiny) by Daniel Roesler, and
 sharing similar goals. Since it has to be run on your server and have access to
 your private ACSD account key, the goal is to make it as short and auditable as
-possible (currently less than 200 lines).  The only prerequisites are python
-and openssl, plus anything you need to run your hook scripts.
+possible (currently less than 200 lines). The only prerequisites are python and
+openssl, plus anything you need to run your hook scripts.
 
 **PLEASE READ THE SOURCE CODE! YOU MUST TRUST IT WITH YOUR ACCOUNT KEY!**
 
 ## What's Different Compared to `acme-tiny`
 
-TODO
+First off, acme-hooked offers a compatibility wrapper that can act as a drop-in
+replacement of acme-tiny. So switching is easy: there is no need to change your
+existing setup. However, if you want to switch over to acme-hooked, it offers
+the following improvements compared to the original acme-tiny:
+
+- acme-hooked clearly separates the conerns of (1) interacting with the ACME
+  server, and (2) modifying your local system. Where acme-tiny directly writes
+  to your filesystem, acme-hooked separates this aspect out into hook scripts
+  that have a clearly defined interface.
+
+- acme-hooked supports processing of more than one CSR at once, without the need
+  to register your account every time, like when running acme-tiny in a loop.
+
+- acme-hooked is able to handle both DNS-01 and HTTP-01 type ACME challenges.
+  acme-tiny was built for the HTTP-01 challenge only.
+
+- acme-hooked still follows the acme-tiny core idea of having tiny, auditable
+  code. It still contains well under 200 lines of actual code that has been
+  thoroughly re-checked, linted, and tidied up.
 
 ## How to Use This Script
 
