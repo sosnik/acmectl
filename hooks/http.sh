@@ -46,7 +46,7 @@ check()
 	# exit with 0 if check succeeds, otherwise != 0
 	timeout=${CHECKTIMEOUT}
 	while [[ timeout -gt 0 ]]; do
-		response="$(curl "http://${domain}/.well-known/acme-challenge/${token}")"
+		response="$(curl --insecure "http://${domain}/.well-known/acme-challenge/${token}")"
 		[[ "${response}" == "${content}" ]] && exit 0
 		timeout=$(($timeout - 3))
 		sleep 3
