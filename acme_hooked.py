@@ -212,7 +212,7 @@ def main(argv=None):
         description=textwrap.dedent("""\
             This script automates the process of getting a signed TLS certificate via the ACME protocol. 
             the ACME protocol. This script runs on your server, has access to your account key, and the
-            internet. It's short. PLEASE READ TRHOUGH IT, so that you can trust it.""")
+            internet. It's short. PLEASE READ THROUGH IT, so that you can trust it.""")
     )
     parser.add_argument("--quiet", action="store_true", help="suppress output except for errors")
     parser.add_argument("--disable-check", default=False, action="store_true", help="disable checking whether ACME challenge is ready for verification")
