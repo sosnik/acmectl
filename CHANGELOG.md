@@ -12,7 +12,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 - setuptools setup.py for distribution
 
-## [Unreleased]
+### Fixed
+
+- typos and text formatting issues
+
+## [0.1.0] - 2017-06-19
 
 ### Added
 
