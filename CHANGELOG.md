@@ -8,7 +8,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added 
+### Added
+
+- setuptools setup.py for distribution
+
+## [Unreleased]
+
+### Added
 
 - acme-hooked, based on [acme-tiny](https://github.com/diafygi/acme-tiny)
 - hooks/template.sh - a template for bash hook scripts
