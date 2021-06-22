@@ -48,7 +48,7 @@ means, this script likely isn't for you! Please use alternatives like
 acme-hooked to register an account for you and sign all following requests, run
 the following command:
 
-```
+```sh
 openssl genrsa 4096 > account.key
 ```
 
@@ -60,12 +60,12 @@ multiple renewals. NOTE: You can't use your account private key as your domain
 private key!
 
 
-```
+```sh
 # generate a domain private key (if you haven't already)
 openssl genrsa 4096 > domain.key
 ```
 
-```
+```sh
 # For a single domain
 openssl req -new -sha256 -key domain.key -subj "/CN=yoursite.com" > domain.csr
 
@@ -86,7 +86,7 @@ can be accessed over the internet. Several template hook scripts are available
 for different purposes. Hook scripts are called by acme-hooked with the
 following parameters (see the [Hook Scripts README](hooks/README.md) for details):
 
-```
+```sh
 # set up a challenge
 /path/to/hookscript setup <domain> <token> <content>
 
@@ -110,7 +110,7 @@ url path of your domain. NOTE: ACME servers will perform a plain HTTP request
 to port 80 on your server, so you must serve the challenge files via HTTP (a
 redirect to HTTPS is fine too).
 
-```
+```sh
 # Make some challenge folder
 mkdir -p /var/www/challenges/
 ```
@@ -148,7 +148,7 @@ With a hook script set up to provision one of the challenges above, you now just
 need to run acme-hooked with enough permissions to read your private account key
 and CSR.
 
-```
+```sh
 # Run the script on your server for the HTTP challenge
 python acme_hooked.py --account-key ./account.key --csr ./domain.csr --http-hook /path/to/hookscript
 
@@ -158,14 +158,14 @@ python acme_hooked.py --account-key ./account.key --csr ./domain.csr --dns-hook 
 
 Finally, the certificate itself will be given to your hook script to store somewhere, like so:
 
-```
+```sh
 # Certificate is passed in via stdin by acme-hooked, equivalent to this:
 echo "<certificate_content>" | /path/to/hookscript write <csrfile>
 ```
 
 Alternatively, you can also use the acme-tiny compatibility wrapper as a drop-in replacement for acme-tiny:
 
-```
+```sh
 # Internally, the compatibility layer calls acme-hooked and a comptability hook script
 python acme_tiny.py --account-key ./account.key --csr ./domain.csr --acme-dir /var/www/challenges/ > ./output.crt
 ```
