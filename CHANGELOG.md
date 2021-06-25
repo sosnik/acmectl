@@ -12,6 +12,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 - setuptools setup.py for distribution
 
+### Changed
+
+- account contact details are only updated if they change
+
 ### Fixed
 
 - typos and text formatting issues
