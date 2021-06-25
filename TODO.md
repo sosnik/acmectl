@@ -9,12 +9,7 @@ This file lists several improvement ideas. Pull requests are welcome.
 - have a loop submitting the challenges (send-signed-req), then another verifying them (poll-until-not)
 - poll-until-not can be optimized (request first, wait/assert later)
 - retry requests (-do-request) several times (how often?) + timeout (how long?) + wait (how long?)
-- account creation logic should not assume that one can re-create an account to obtain info about an existing account
-  - first, try to obtain account via key
-  - if it doesn't exist, create it
-  - if it exists, update contact details
-  - log account ID(?)
-- proper setup files
+- log account ID(?)
 - testing against pebble
 - continuous integration
 - windows/mac support
