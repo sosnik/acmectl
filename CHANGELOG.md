@@ -8,6 +8,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2017-06-25
+
 ### Added
 
 - setuptools setup.py for distribution
