@@ -6,7 +6,6 @@ This file lists several improvement ideas. Pull requests are welcome.
 
 - wildcard domain certificates - maybe they just work(TM)?
 - don't get new nonce every time, it's always supplied by each request (except the first)
-- have a loop submitting the challenges (send-signed-req), then another verifying them (poll-until-not)
 - poll-until-not can be optimized (request first, wait/assert later)
 - retry requests (-do-request) several times (how often?) + timeout (how long?) + wait (how long?)
 - log account ID(?)

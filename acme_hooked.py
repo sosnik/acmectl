@@ -170,7 +170,11 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
 
     # say the challenge is ready for checking
     for (domain, token, content, challenge_url, auth_url, order) in requests:
+        LOGGER.info("Notifying that challenge for %s is ready.", domain)
         _send_signed_request(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
+
+    # check that they challenge has been completed
+    for (domain, token, content, challenge_url, auth_url, order) in requests:
         LOGGER.info("Verifying %s.", domain)
         authorization = _poll_until_not(auth_url, ["pending"], "Error checking challenge status for {0}".format(domain))
         if authorization['status'] != "valid":

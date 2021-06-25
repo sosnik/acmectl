@@ -15,6 +15,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - account contact details are only updated if they change
+- tell ACME server that all challenges are ready before verifying
 
 ### Fixed
 
