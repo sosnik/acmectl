@@ -49,7 +49,7 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
         if depth < 100 and resp_code == 400 and resp_data['type'] == "urn:ietf:params:acme:error:badNonce":
             raise IndexError(resp_data) # allow 100 retries for bad nonces
         if resp_code not in [200, 201, 204]:
-            raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, code, resp_data))
+            raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
         return resp_data, resp_code, headers
 
     # helper function - make signed requests
@@ -102,9 +102,9 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
     reg_payload = {"termsOfServiceAgreed": True}
     if contact is not None:
         reg_payload.update({"contact": contact})
-    account, code, acct_headers = _send_signed_request(directory['newAccount'], reg_payload, "Error registering")
-    LOGGER.info("Registered." if code == 201 else "Already registered.")
-    if contact is not None and code != 201:
+    account, resp_code, acct_headers = _send_signed_request(directory['newAccount'], reg_payload, "Error registering")
+    LOGGER.info("Registered." if resp_code == 201 else "Already registered.")
+    if contact is not None and resp_code != 201 and not set(contact) == set(account['contact']):
         account, _, _ = _send_signed_request(acct_headers['Location'], {"contact": contact}, "Error updating contact details")
         LOGGER.info("Updated contact details: %s.", "; ".join(account['contact']))
 
