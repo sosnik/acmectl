@@ -2,6 +2,10 @@
 
 This file lists several improvement ideas. Pull requests are welcome.
 
+## Security
+
+- all tokens received from the web should be validated
+
 ## Improvements
 
 - wildcard domain certificates - maybe they just work(TM)?
@@ -16,4 +20,5 @@ This file lists several improvement ideas. Pull requests are welcome.
 - convert bash scripts to POSIX shell
 
 ## Interesting Additions (Possibly With Trade-offs)
+
 - switch from openssl + subprocess to some crypto library (check how common this dependency is)
