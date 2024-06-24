@@ -4,16 +4,14 @@
 # Copyright (C) 2015-2021 The acme-hooked authors.
 # Licensed under the MIT license, see LICENSE.
 
-# this script provides a compatibility layer between acme_hooked and acme_tiny
-# by emulating the acme_tiny behaviour. It is also used by the acme_tiny.py
-# warpper.
+# this script moves the challenge files into the .well-known directory
+# to satisfy the HTTP-01 type check.
 #
 # dependencies: curl, rm -f, cat
 
 # change this to appropriate values for your setting
-
-declare ACME_DIR="/path/to/.well-known/acme-challenge/"
-declare -r CHECKTIMEOUT=10 # seconds
+declare -r ACME_DIR="/var/www/challenges/"
+declare -r CHECKTIMEOUT=60 # seconds
 
 die()
 {
@@ -78,16 +76,11 @@ write()
 
 	# read certificate from stdin and process it
 	# any output of this function is echoed by acme_hooked
-	cat
+	crtfile="${csrfile%.csr}.crt"
+	cat > "${crtfile}"
 }
 
 
-# the acme-dir is passed in as the first parameter
-[[ $# -ge 1 ]] && [[ -d "$1" ]] || die 'Invalid acme-dir given.'
-ACME_DIR="$1"
-shift
-
-# remaining arguments
 [[ $# -ge 1 ]] || die 'Missing arguments.'
 if [[ "$1" == 'setup' ]]; then
 	[[ $# == 4 ]] || die 'Wrong number of arguments.'

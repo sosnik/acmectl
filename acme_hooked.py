@@ -1,8 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # acme-hooked - a script to issue TLS certificates via ACME
 # Copyright (C) 2015-2021 The acme-hooked authors.
 # Licensed under the MIT license, see LICENSE.
+# source: https://github.com/mmorak/acme-hooked/blob/master/acme_hooked.py
 
 import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging
 from urllib.request import urlopen, Request
@@ -37,7 +38,7 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
     # helper function - make request and automatically parse json response
     def _do_request(url, data=None, err_msg="Error", depth=0):
         try:
-            resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acme-tiny"}))
+            resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acmectl"}))
             resp_data, resp_code, headers = resp.read().decode("utf8"), resp.getcode(), resp.headers
         except IOError as error:
             resp_data = error.read().decode("utf8") if hasattr(error, "read") else str(error)
@@ -168,7 +169,7 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
                 LOGGER.error("Check failed for domain %s.", domain)
                 orders = [(o, oh, c) for (o, oh, c) in orders if o != order] # remove the failed order
 
-    # say the challenge is ready for checking
+    # sayz the challenge is ready for checking
     for (domain, token, content, challenge_url, auth_url, order) in requests:
         LOGGER.info("Notifying that challenge for %s is ready.", domain)
         _send_signed_request(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
@@ -191,10 +192,16 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
     _do_hook(hook, "finish", [])
 
     # finalize each order where all challenges passed
+    finalize_urls = [] 
+
     for (order, order_headers, csrfile) in orders:
         LOGGER.info("Signing certificate for CSR %s.", csrfile)
         csr_der = _cmd(["openssl", "req", "-in", csrfile, "-outform", "DER"], err_msg="DER Export Error")
-        _send_signed_request(order['finalize'], {"csr": _b64(csr_der)}, "Error finalizing order")
+
+        # Only finalize each order once (multiple CSRs can be signed by the same order)
+        if order['finalize'] not in finalize_urls:
+            _send_signed_request(order['finalize'], {"csr": _b64(csr_der)}, "Error finalizing order")
+            finalize_urls.append(order['finalize'])
 
         # poll the order to monitor when it's done
         order = _poll_until_not(order_headers['Location'], ["pending", "processing"], "Error checking order status")

@@ -1,0 +1,9 @@
+[Unit]
+Description="Automated Let's Encrypt Renewal"
+After=network.target
+[Service]
+User=acmectl
+Group=acmectl
+Type=simple
+WorkingDirectory=/home/acmectl/
+ExecStart=/home/acmectl/acmectl.py unattended
