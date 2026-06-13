@@ -5,3 +5,4 @@ hooks/http/*.conf
 *.csr
 *.crt
 *.san
+*.id

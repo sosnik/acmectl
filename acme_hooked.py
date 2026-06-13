@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-
+#
 # acme-hooked - a script to issue TLS certificates via ACME
 # Copyright (C) 2015-2021 The acme-hooked authors.
-# Licensed under the MIT license, see LICENSE.
-# source: https://github.com/mmorak/acme-hooked/blob/master/acme_hooked.py
+# Copyright (C) 2024-2026 Nikita Sosnik
+# Licensed under the MIT license.
+# source: https://github.com/sosnik/acmectl/blob/master/acme_hooked.py
 
-import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging
+import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging, importlib.util, os
 from urllib.request import urlopen, Request
+
+__all__ = ['sign_crts', 'list_profiles', 'get_cert_id'] ## don't forget: revocation, keychange, ari (placeholders below)
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORY_URL = "https://acme-v02.api.letsencrypt.org/directory"
 
+# === Helper functions ===
 # helper function - run external commands
 def _cmd(cmd_list, stdin=None, cmd_input=None, err_msg="Command Line Error"):
     proc = subprocess.Popen(cmd_list, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -28,54 +32,92 @@ def _do_hook(hook_list, cmd, argument_list, stdin=None, cmd_input=None, echo=Fal
     elif out:
         LOGGER.info(out.decode('utf8').rstrip("\n"))
 
-def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None):
-    crts, requests, orders, directory, acct_headers, alg, jwk = [], [], [], None, None, None, None # global variables
+# helper functions - base64 encode for jose spec
+def _b64(bytestring):
+    return base64.urlsafe_b64encode(bytestring).decode('utf8').replace("=", "")
 
-    # helper functions - base64 encode for jose spec
-    def _b64(bytestring):
-        return base64.urlsafe_b64encode(bytestring).decode('utf8').replace("=", "")
+# helper function - make request and automatically parse json response
+def _do_request(url, data=None, err_msg="Error", depth=0):
+    try:
+        resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acmectl"}))
+        resp_data, resp_code, headers = resp.read().decode("utf8"), resp.getcode(), resp.headers
+    except IOError as error:
+        resp_data = error.read().decode("utf8") if hasattr(error, "read") else str(error)
+        resp_code, headers = getattr(error, "code", None), {}
+    try:
+        resp_data = json.loads(resp_data) # try to parse json results
+    except ValueError:
+        pass # ignore json parsing errors
+    if depth < 100 and resp_code == 400 and resp_data['type'] == "urn:ietf:params:acme:error:badNonce":
+        raise IndexError(resp_data) # allow 100 retries for bad nonces
+    if resp_code not in [200, 201, 204]:
+        raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
+    return resp_data, resp_code, headers
 
-    # helper function - make request and automatically parse json response
-    def _do_request(url, data=None, err_msg="Error", depth=0):
-        try:
-            resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acmectl"}))
-            resp_data, resp_code, headers = resp.read().decode("utf8"), resp.getcode(), resp.headers
-        except IOError as error:
-            resp_data = error.read().decode("utf8") if hasattr(error, "read") else str(error)
-            resp_code, headers = getattr(error, "code", None), {}
-        try:
-            resp_data = json.loads(resp_data) # try to parse json results
-        except ValueError:
-            pass # ignore json parsing errors
-        if depth < 100 and resp_code == 400 and resp_data['type'] == "urn:ietf:params:acme:error:badNonce":
-            raise IndexError(resp_data) # allow 100 retries for bad nonces
-        if resp_code not in [200, 201, 204]:
-            raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
+# helper function - make signed requests
+def _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce, depth=0):
+    payload64 = "" if payload is None else _b64(json.dumps(payload).encode('utf8'))
+    new_nonce = _do_request(directory['newNonce'])[2].get('Replay-Nonce') if nonce[0] is None else nonce[0]
+    protected = {"url": url, "alg": alg, "nonce": new_nonce}
+    protected.update({"jwk": jwk} if acct_headers is None else {"kid": acct_headers['Location']})
+    protected64 = _b64(json.dumps(protected).encode('utf8'))
+    protected_input = "{0}.{1}".format(protected64, payload64).encode('utf8')
+    out = _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=protected_input, err_msg="OpenSSL Error")
+    data = json.dumps({"protected": protected64, "payload": payload64, "signature": _b64(out)})
+    try:
+        resp_data, resp_code, headers = _do_request(url, data=data.encode('utf8'), err_msg=err_msg, depth=depth)
+        # Cache the nonce for the next request (every successful response carries one)
+        if 'Replay-Nonce' in headers:
+            nonce[0] = headers['Replay-Nonce']
         return resp_data, resp_code, headers
+    except IndexError:  # badNonce
+        nonce[0] = None  # force fresh nonce on retry
+        return _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce, depth=(depth + 1))
 
-    # helper function - make signed requests
-    def _send_signed_request(url, payload, err_msg, depth=0):
-        payload64 = "" if payload is None else _b64(json.dumps(payload).encode('utf8'))
-        new_nonce = _do_request(directory['newNonce'])[2]['Replay-Nonce']
-        protected = {"url": url, "alg": alg, "nonce": new_nonce}
-        protected.update({"jwk": jwk} if acct_headers is None else {"kid": acct_headers['Location']})
-        protected64 = _b64(json.dumps(protected).encode('utf8'))
-        protected_input = "{0}.{1}".format(protected64, payload64).encode('utf8')
-        out = _cmd(["openssl", "dgst", "-sha256", "-sign", account_key], stdin=subprocess.PIPE, cmd_input=protected_input, err_msg="OpenSSL Error")
-        data = json.dumps({"protected": protected64, "payload": payload64, "signature": _b64(out)})
-        try:
-            return _do_request(url, data=data.encode('utf8'), err_msg=err_msg, depth=depth)
-        except IndexError: # retry bad nonces (they raise IndexError)
-            return _send_signed_request(url, payload, err_msg, depth=(depth + 1))
+# helper function - poll until complete
+# Accepts optional sender (3-arg callable) so sign_crts can pass a context-closing wrapper.
+def _poll_until_not(url, pending_statuses, err_msg, sender=None):
+    if sender is None:
+        sender = lambda u, p, e: _send_signed_request(u, p, e, None, None, None, None, None, [None])
+    result, _, _ = sender(url, None, err_msg)
+    start_time = time.time()
+    while result['status'] in pending_statuses:
+        assert (time.time() - start_time < 3600), "Polling timeout" # 1 hour timeout
+        time.sleep(2)
+        result, _, _ = sender(url, None, err_msg)
+    return result
 
-    # helper function - poll until complete
-    def _poll_until_not(url, pending_statuses, err_msg):
-        result, start_time = None, time.time()
-        while result is None or result['status'] in pending_statuses:
-            assert (time.time() - start_time < 3600), "Polling timeout" # 1 hour timeout
-            time.sleep(0 if result is None else 2)
-            result, _, _ = _send_signed_request(url, None, err_msg)
-        return result
+def list_profiles(directory_url=DEFAULT_DIRECTORY_URL):
+    """Informative command: print supported profiles."""
+    directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
+    meta = directory.get("meta", {})
+    profiles = meta.get("profiles", {})
+    if not profiles:
+        LOGGER.info("No profiles advertised by this directory.")
+        return
+    LOGGER.info("Supported ACME profiles:")
+    for name, desc in profiles.items():
+        LOGGER.info(f"  {name}: {desc}")
+
+def get_cert_id(cert_path):
+    """Return the ARI CertID (RFC 9773) for a PEM certificate."""
+
+    # AKI keyIdentifier
+    out = _cmd(["openssl", "x509", "-in", cert_path, "-noout", "-ext", "authorityKeyIdentifier"], err_msg="Failed to read AKI")
+    m = re.search(r"([0-9a-fA-F]{2}:)+[0-9a-fA-F]{2}", out.decode("utf8"), re.DOTALL)
+    if not m:
+        raise ValueError("No Authority Key Identifier found in certificate")
+    aki_bytes = binascii.unhexlify(m.group(0).replace(":", ""))
+    # Serial number (including any leading zero byte required by DER)
+    out = _cmd(["openssl", "x509", "-in", cert_path, "-noout", "-serial"],
+               err_msg="Failed to read serial")
+    serial_hex = out.decode("utf8").strip().split("=", 1)[1]
+    serial_bytes = binascii.unhexlify(serial_hex)
+    
+    return f"{_b64(aki_bytes)}.{_b64(serial_bytes)}"
+
+def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None, profile=None, replaces=None):
+    crts, requests, orders, directory, acct_headers, alg, jwk, nonce = [], [], [], None, None, None, None, [None] # nonce is mutable list for reuse across signed requests
 
     # parse account key to get public key
     LOGGER.info("Parsing account key.")
@@ -98,16 +140,25 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
     directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
     LOGGER.info("Directory found.")
 
+    # Obtain a nonce once up front; subsequent responses will supply the next nonce (optimization)
+    nonce[0] = _do_request(directory['newNonce'])[2].get('Replay-Nonce')
+
     # create account, update contact details (if any), and set the global key identifier
     LOGGER.info("Registering account.")
     reg_payload = {"termsOfServiceAgreed": True}
     if contact is not None:
         reg_payload.update({"contact": contact})
-    account, resp_code, acct_headers = _send_signed_request(directory['newAccount'], reg_payload, "Error registering")
+    # newAccount uses acct_headers=None (triggers jwk instead of kid) + the pre-fetched nonce list
+    account, resp_code, acct_headers = _send_signed_request(directory['newAccount'], reg_payload, "Error registering", directory, jwk, alg, None, account_key, nonce)
     LOGGER.info("Registered." if resp_code == 201 else "Already registered.")
     if contact is not None and resp_code != 201 and not set(contact) == set(account['contact']):
-        account, _, _ = _send_signed_request(acct_headers['Location'], {"contact": contact}, "Error updating contact details")
+        account, _, _ = _send_signed_request(acct_headers['Location'], {"contact": contact}, "Error updating contact details", directory, jwk, alg, acct_headers, account_key, nonce)
         LOGGER.info("Updated contact details: %s.", "; ".join(account['contact']))
+
+    # Local short-form sender (closes over directory/jwk/alg/acct_headers/account_key/nonce).
+    # All post-account signed requests (newOrder, auths, challenges, finalize, downloads) use this.
+    def _send(url, payload, err_msg):
+        return _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce)
 
     # find domains
     for csrfile in csr:
@@ -127,13 +178,20 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
         # create a new order
         LOGGER.info("Creating new order.")
         order_payload = {"identifiers": [{"type": "dns", "value": d} for d in domains]}
-        order, _, order_headers = _send_signed_request(directory['newOrder'], order_payload, "Error creating new order")
-        LOGGER.info("Order created.")
+        if profile:
+            order_payload["profile"] = profile
+            LOGGER.info("Requesting profile: %s", profile)
+        if replaces:
+            order_payload["replaces"] = replaces
+            LOGGER.info("Requesting replacement of CertID: %s", replaces)
+
+        order, _, order_headers = _send(directory['newOrder'], order_payload, "Error creating new order")
+        LOGGER.info("Order created. Server selected profile: %s", order['profile']) if 'profile' in order else LOGGER.info("Order created.")
         orders += [(order, order_headers, csrfile)]
 
         # get the authorizations that need to be completed
         for auth_url in order['authorizations']:
-            authorization, _, _ = _send_signed_request(auth_url, None, "Error getting challenges")
+            authorization, _, _ = _send(auth_url, None, "Error getting challenges")
             domain = authorization['identifier']['value']
             if authorization['status'] == 'valid':
                 LOGGER.info("Domain %s already verified. Skipping.", domain)
@@ -169,15 +227,15 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
                 LOGGER.error("Check failed for domain %s.", domain)
                 orders = [(o, oh, c) for (o, oh, c) in orders if o != order] # remove the failed order
 
-    # sayz the challenge is ready for checking
+    # says the challenge is ready for checking
     for (domain, token, content, challenge_url, auth_url, order) in requests:
         LOGGER.info("Notifying that challenge for %s is ready.", domain)
-        _send_signed_request(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
+        _send(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
 
     # check that they challenge has been completed
     for (domain, token, content, challenge_url, auth_url, order) in requests:
         LOGGER.info("Verifying %s.", domain)
-        authorization = _poll_until_not(auth_url, ["pending"], "Error checking challenge status for {0}".format(domain))
+        authorization = _poll_until_not(auth_url, ["pending"], "Error checking challenge status for {0}".format(domain), sender=_send)
         if authorization['status'] != "valid":
             LOGGER.error("Challenge did not pass for %s: %s", domain, authorization)
             orders = [(o, oh, c) for (o, oh, c) in orders if o != order] # remove the failed order
@@ -200,16 +258,16 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
 
         # Only finalize each order once (multiple CSRs can be signed by the same order)
         if order['finalize'] not in finalize_urls:
-            _send_signed_request(order['finalize'], {"csr": _b64(csr_der)}, "Error finalizing order")
+            _send(order['finalize'], {"csr": _b64(csr_der)}, "Error finalizing order")
             finalize_urls.append(order['finalize'])
 
         # poll the order to monitor when it's done
-        order = _poll_until_not(order_headers['Location'], ["pending", "processing"], "Error checking order status")
+        order = _poll_until_not(order_headers['Location'], ["pending", "processing"], "Error checking order status", sender=_send)
         if order['status'] != "valid":
             raise ValueError("Order failed: {0}".format(order))
 
         # download the certificate
-        certificate_pem, _, _ = _send_signed_request(order['certificate'], None, "Certificate download failed")
+        certificate_pem, _, _ = _send(order['certificate'], None, "Certificate download failed")
         LOGGER.info("Certificate signed for %s.", csrfile)
         crts += [(csrfile, certificate_pem)]
 
@@ -221,32 +279,75 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=textwrap.dedent("""\
-            This script automates the process of getting a signed TLS certificate via the ACME protocol. 
-            the ACME protocol. This script runs on your server, has access to your account key, and the
-            internet. It's short. PLEASE READ THROUGH IT, so that you can trust it.""")
+            This script automates the process of getting a signed TLS certificate via  
+            the ACME protocol. It can be called from the CLI or as a module.  
+            This script runs on your server, has access to your account key, and the
+            internet. It's short. PLEASE READ THROUGH IT, so that you can trust it."""
+                                    )
     )
-    parser.add_argument("--quiet", action="store_true", help="suppress output except for errors")
-    parser.add_argument("--disable-check", default=False, action="store_true", help="disable checking whether ACME challenge is ready for verification")
 
-    parser.add_argument("--account-key", required=True, help="path to your ACSD account private key")
-    parser.add_argument("--contact", metavar="CONTACT", default=None, nargs="*", help="Contact details (e.g. mailto:aaa@bbb.com) for your account-key")
-    parser.add_argument("--csr", required=True, action='append', help="path to your certificate signing request, can be given multiple times")
+    # Common options available to *all* subcommands (including future placeholders).
+    parser.add_argument("-q", "--quiet", action="store_true", help="suppress output except for errors")
+    parser.add_argument("--directory-url", default=DEFAULT_DIRECTORY_URL, help="certificate authority directory url, default is Let's Encrypt production")
 
-    cagroup = parser.add_mutually_exclusive_group()
-    cagroup.add_argument("--directory-url", default=DEFAULT_DIRECTORY_URL, help="certificate authority directory url, default is Let's Encrypt")
+    subparsers = parser.add_subparsers(dest="command", required=True, title="commands")
 
-    hookgroup = parser.add_mutually_exclusive_group(required=True)
+    # === SIGN ===
+    sign_parser = subparsers.add_parser("sign", help="Issue/renew certificate(s)")
+    sign_parser.add_argument("--disable-check", default=False, action="store_true", help="disable checking whether ACME challenge is ready for verification")
+    sign_parser.add_argument("--account-key", required=True, help="path to your ACME account private key")
+    sign_parser.add_argument("--contact", metavar="CONTACT", default=None, nargs="*", help="Contact details (e.g. mailto:aaa@bbb.com) for your account-key")
+    sign_parser.add_argument("--csr", required=True, action="append", help="path to your certificate signing request, can be given multiple times")
+    sign_parser.add_argument("--profile", help="ACME profile name (see 'profiles' command). Optional; server chooses default if omitted.")
+    sign_parser.add_argument("--replaces", help="RFC 9773 CertID of certificate to replace (for renewal). Optional; if omitted, a new certificate will be issued instead of renewing an existing one.")
+    hookgroup = sign_parser.add_mutually_exclusive_group(required=True)
     hookgroup.add_argument("--dns-hook", help="the hook script to call for DNS-01 type challenges")
     hookgroup.add_argument("--http-hook", help="the hook script to call for HTTP-01 type challenges")
 
+    # === PROFILES ===
+    profiles_parser = subparsers.add_parser("profiles", help="List supported profiles")
+
+    # === CERTID (for ARI in control script) ===
+    certid_parser = subparsers.add_parser("certid", help="Compute ARI CertID (RFC 9773) from a certificate")
+    certid_parser.add_argument("certificate", help="path to PEM certificate")  # positional: the only argument for this command
+
+    # === Placeholders for future features (keep minimal to preserve auditability) ===
+    subparsers.add_parser("revoke", help="Revoke certificate (ACME revokeCert; placeholder - not implemented)")
+    subparsers.add_parser("keychange", help="Account key rollover (ACME keyChange; placeholder - not implemented)")
+    ari_parser = subparsers.add_parser("ari", help="Query ARI renewal window (RFC 9773; relies on certid)")
+    ari_parser.add_argument("certificate", help="path to PEM certificate (computes CertID internally)")
+
     args = parser.parse_args(argv)
+
     logging.basicConfig(format='%(message)s', level=logging.ERROR if args.quiet else logging.INFO)
 
-    challenge_type = 'http' if args.http_hook else 'dns'
-    hook = [args.http_hook] if args.http_hook else [args.dns_hook]
-
-    # sign the certificates in the CSRs
-    sign_crts(args.account_key, args.csr, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact, hook=hook, challenge_type=challenge_type)
+    if args.command == "profiles":
+        list_profiles(args.directory_url)
+    elif args.command == "certid":
+        print(get_cert_id(args.certificate))
+    elif args.command == "sign":
+        challenge_type = "http" if args.http_hook else "dns"
+        hook = [args.http_hook] if args.http_hook else [args.dns_hook]
+        sign_crts(
+            account_key=args.account_key,
+            csr=args.csr,
+            disable_check=args.disable_check,
+            directory_url=args.directory_url,
+            contact=args.contact,
+            hook=hook,
+            challenge_type=challenge_type,
+            profile=args.profile,
+            replaces=args.replaces
+        )
+    elif args.command == "revoke":
+        raise NotImplementedError("revoke not implemented (placeholder per plan; see TODO.md and RFC 8555 §7.6)")
+    elif args.command == "keychange":
+        raise NotImplementedError("keychange not implemented (placeholder per plan; see TODO.md and RFC 8555 §7.3.5)")
+    elif args.command == "ari":
+        # Demonstrate reliance on get_cert_id + surface a usable CertID immediately.
+        cid = get_cert_id(args.certificate)
+        print(f"CertID: {cid}")
+        raise NotImplementedError("ari query not implemented (placeholder; directory['renewalInfo'] + GET will be added later)")
 
 if __name__ == "__main__": # pragma: no cover
     main(sys.argv[1:])

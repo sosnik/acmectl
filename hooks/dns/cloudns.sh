@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-
+#
 # acme-hooked - a script to issue TLS certificates via ACME
 # Copyright (C) 2015-2022 The acme-hooked authors
-# Copyright (C) 2023-2024 Nikita Sosnik
+# Copyright (C) 2023-2026 Nikita Sosnik
 # Licensed under the MIT license, see LICENSE.
-
+#
 # For use with CloudNS: https://www.cloudns.net/
 # dependencies: curl (duh)
 
+umask 077
+
 # load config; required values: API_URL, SUB_AUTH_USER, AUTH_PASSWORD
-#if [ ! -f ./cloudns.conf && ( API_URL == "" || SUB_AUTH_USER == "" || AUTH_PASSWORD == "" ) ]; then
-#  echo "Missing required configuration values. Either create ./cloudns.conf or set API_URL, SUB_AUTH_USER, and AUTH_PASSWORD in the environment."
-#  exit 1
-#fi
-  
-. ./cloudns.conf
+if [ ! -f "$PWD/hooks/dns/cloudns.conf" ] && { [ -z "$API_URL" ] || [ -z "$SUB_AUTH_USER" ] || [ -z "$AUTH_PASSWORD" ]; }; then
+  echo "Missing required configuration values. Either create ./cloudns.conf or set API_URL, SUB_AUTH_USER, and AUTH_PASSWORD in the environment."
+  exit 1
+fi
+. "$PWD/hooks/dns/cloudns.conf"
 
 die()
 {
@@ -32,7 +33,7 @@ setup()
   # also save the record ID, will need it to delete the record later
   curl -s -X POST "${API_URL}/add-record.json" \
     -d "sub-auth-user=${SUB_AUTH_USER}&auth-password=${AUTH_PASSWORD}&domain-name=${VALIDATION_ZONE}&record-type=TXT&host=&record=${content}&ttl=60" \
-    | grep -o -e "[0-9]*" > "${content}.id" || { result=$?; if [ $result -ne 0 ]; then die "Failed to add challenge for ${domain}"; fi; }
+    | grep -o -e "[0-9]*" > "$PWD/state/${content}.id" || { result=$?; if [ $result -ne 0 ]; then die "Failed to add challenge for ${domain}"; fi; }
 }
 
 activate()
@@ -52,7 +53,7 @@ check()
   tries=1 
   while [ $tries -lt 3600 ]; 
   do
-    curl -s -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=_acme-challenge.${domain}&type=TXT" | grep -q "${content}"
+    curl -A "acmectl" -s -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=_acme-challenge.${domain}&type=TXT" | grep -q "${content}"
     if [ $? -eq 0 ]; then
       return 0
     fi
@@ -71,12 +72,14 @@ remove()
   content="$3"
 
   # remove the challenges for the given domain
-  curl -s -X POST "${API_URL}/delete-record.json" \
-    -d "sub-auth-user=${SUB_AUTH_USER}&auth-password=${AUTH_PASSWORD}&domain-name=${VALIDATION_ZONE}&record-id=$(cat ${content}.id)" \
-    || die "Failed to remove challenge for ${domain}"
+  if [ -f "$PWD/state/${content}.id" ]; then
+  
+    curl -s -X POST "${API_URL}/delete-record.json" \
+      -d "sub-auth-user=${SUB_AUTH_USER}&auth-password=${AUTH_PASSWORD}&domain-name=${VALIDATION_ZONE}&record-id=$(cat "$PWD/state/${content}.id")" \
+      || die "Failed to remove challenge for ${domain}"
 
-  if [ -f "${content}.id" ]; then
-    rm "${content}.id" > /dev/null 2>&1
+    rm "$PWD/state/${content}.id" > /dev/null 2>&1
+
   fi
 }
 
@@ -88,12 +91,18 @@ finish()
 
 write()
 {
-  csrfile="$1"
-
   # read certificate from stdin and process it
   # any output of this function is echoed by acme_hooked
-  crtfile="${csrfile%.csr}.crt"
-  cat > "${crtfile}"
+  # the CSR path is passed as the first argument
+  echo $1 
+  certname="$(basename $1 .csr)"
+  echo $certname
+  # save certificate to $PWD/certs/<certname>.crt
+  if [ -f "$PWD/certs/${certname}.crt" ]; then
+    mv "$PWD/certs/${certname}.crt" "$PWD/certs/${certname}.crt.bak" > /dev/null 2>&1 || true # backup existing cert if it exists
+  fi
+  # write new cert
+  cat > "$PWD/certs/${certname}.crt"
 }
 
 

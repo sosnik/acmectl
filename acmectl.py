@@ -10,8 +10,6 @@ if not os.path.isfile('acmectl.conf'):
 config.read('acmectl.conf')
 options = config['general']
 endpoints = config['endpoints']
-
-# set BASEDIR from config (if set), otherwise from current working directory
 BASEDIR = options['WORKDIR'] if options["WORKDIR"] else os.getcwd()
 
 def die(message):
@@ -33,7 +31,6 @@ def genkey(mode="both", name="", curve=options["CURVE"]):
         else:
             LOGGER.info(ecparam.stderr.decode())
 
-
 def gencsr(name):
     if not os.path.isfile(os.path.join(BASEDIR, 'certs', f'{name}.san')):
         die(f"Cannot read SAN file {name}.san")
@@ -47,16 +44,16 @@ def gencsr(name):
     if os.path.isfile(os.path.join(BASEDIR, 'certs', f'{name}.ecdsa.key')):
         subprocess.run(['openssl', 'req', '-new', '-sha256', '-key', os.path.join(BASEDIR, 'certs', f'{name}.ecdsa.key'), '-subj', '/', '-addext', SANEXT], stdout=open(os.path.join(BASEDIR, 'certs', f'{name}.ecdsa.csr'), 'w'))
 
-
-def getone(name, use_hook, endpoint):
+def getone(name, use_hook, endpoint, quiet=False):
     csrs = ""
     if os.path.isfile(os.path.join(BASEDIR, 'certs', f'{name}.rsa.csr')):
         csrs += f"--csr {os.path.join(BASEDIR, 'certs', f'{name}.rsa.csr')} "
     if os.path.isfile(os.path.join(BASEDIR, 'certs', f'{name}.ecdsa.csr')):
         csrs += f"--csr {os.path.join(BASEDIR, 'certs', f'{name}.ecdsa.csr')} "
 
+    q = "-q " if quiet else ""
     # subprocess.run() needs each argument to be a separate list element; some of my parameters are already pre-prepared arguments and will break the subprocess.run() call
-    cmdline = f"python3 acme_hooked.py --account-key {options['LE_ACCOUNT_KEY']} {use_hook} {csrs}--directory {endpoint}"
+    cmdline = f"python3 acme_hooked.py {q}--account-key {options['LE_ACCOUNT_KEY']} {use_hook} {csrs}--directory-url {endpoint}"
     subprocess.run(cmdline.split(' '))
 
 def quickstart(name, use_hook, endpoint):
@@ -70,19 +67,20 @@ def quickstart(name, use_hook, endpoint):
 
     genkey("both", name)
     gencsr(name)
-    getone(name, use_hook, endpoint)
+    getone(name, use_hook, endpoint, quiet=False)  # quickstart is interactive; quiet handled by caller if needed
 
-def unattended(endpoint):
+def unattended(endpoint, quiet=False):
     # traverse BASEDIR/by-hook/dns and build a list of csrs that will be called with the default dns hook
     use_with_dns_hook = " ".join([f"--csr {os.path.join(root, file)}" for root, dirs, files in os.walk(os.path.join(BASEDIR, 'by-hook', 'dns')) for file in files if file.endswith('.csr')])
     # traverse BASEDIR/by-hook/http and build a list of csrs that will be called with the default dns hook
     use_with_http_hook = " ".join([f"--csr {os.path.join(root, file)}" for root, dirs, files in os.walk(os.path.join(BASEDIR, 'by-hook', 'http')) for file in files if file.endswith('.csr')])
 
+    q = "-q " if quiet else ""
     if use_with_dns_hook:
-        cmdline = f"python3 acme_hooked.py --account-key {options['LE_ACCOUNT_KEY']} --dns-hook {os.path.join(BASEDIR, 'hooks', 'dns', options['DNS_HOOK'])} {use_with_dns_hook} --directory {endpoint}"
+        cmdline = f"python3 acme_hooked.py {q}--account-key {options['LE_ACCOUNT_KEY']} --dns-hook {os.path.join(BASEDIR, 'hooks', 'dns', options['DNS_HOOK'])} {use_with_dns_hook} --directory-url {endpoint}"
         subprocess.run(cmdline.split(' '))
     if use_with_http_hook:
-        cmdline = f"python3 acme_hooked.py --account-key {options['LE_ACCOUNT_KEY']} --http-hook {os.path.join(BASEDIR, 'hooks', 'http', options['HTTP_HOOK'])} {use_with_http_hook} --directory {endpoint}"
+        cmdline = f"python3 acme_hooked.py {q}--account-key {options['LE_ACCOUNT_KEY']} --http-hook {os.path.join(BASEDIR, 'hooks', 'http', options['HTTP_HOOK'])} {use_with_http_hook} --directory-url {endpoint}"
         subprocess.run(cmdline.split(' '))
 
 def main(argv=None):
@@ -139,11 +137,11 @@ def main(argv=None):
     elif args.command == "gencsr":
         gencsr(args.name)
     elif args.command == "getone":
-        getone(args.name, use_hook, endpoint)
+        getone(args.name, use_hook, endpoint, quiet=args.quiet)
     elif args.command == "unattended":
-        unattended(endpoint)
+        unattended(endpoint, quiet=args.quiet)
     elif args.command == "quickstart":
-        quickstart(args.name, use_hook, endpoint)
+        quickstart(args.name, use_hook, endpoint)  # quickstart is user-facing; quiet=False inside
     else:
         parser.print_help()
         exit(1)
