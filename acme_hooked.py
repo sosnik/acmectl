@@ -6,10 +6,10 @@
 # Licensed under the MIT license.
 # source: https://github.com/sosnik/acmectl/blob/master/acme_hooked.py
 
-import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging, importlib.util, os
+import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging, os
 from urllib.request import urlopen, Request
 
-__all__ = ['sign_crts', 'list_profiles', 'get_cert_id'] ## don't forget: revocation, keychange, ari (placeholders below)
+__all__ = ['sign_crts', 'list_profiles', 'get_cert_id', 'get_ari', 'revoke_cert']
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORY_URL = "https://acme-v02.api.letsencrypt.org/directory"
@@ -36,23 +36,37 @@ def _do_hook(hook_list, cmd, argument_list, stdin=None, cmd_input=None, echo=Fal
 def _b64(bytestring):
     return base64.urlsafe_b64encode(bytestring).decode('utf8').replace("=", "")
 
-# helper function - make request and automatically parse json response
+# Four attempts. Sleep 1s, then 2s, then 4s, or a numeric Retry-After below 60s.
+# badNonce is retried immediately by _send_signed_request and does not use these waits.
 def _do_request(url, data=None, err_msg="Error", depth=0):
-    try:
-        resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acmectl"}))
-        resp_data, resp_code, headers = resp.read().decode("utf8"), resp.getcode(), resp.headers
-    except IOError as error:
-        resp_data = error.read().decode("utf8") if hasattr(error, "read") else str(error)
-        resp_code, headers = getattr(error, "code", None), {}
-    try:
-        resp_data = json.loads(resp_data) # try to parse json results
-    except ValueError:
-        pass # ignore json parsing errors
-    if depth < 100 and resp_code == 400 and resp_data['type'] == "urn:ietf:params:acme:error:badNonce":
-        raise IndexError(resp_data) # allow 100 retries for bad nonces
-    if resp_code not in [200, 201, 204]:
+    delay = 1
+    for attempt in range(4):
+        headers = {}
+        try:
+            resp = urlopen(Request(url, data=data, headers={"Content-Type": "application/jose+json", "User-Agent": "acmectl"}), timeout=30)
+            resp_data, resp_code, headers = resp.read().decode("utf8"), resp.getcode(), resp.headers
+        except IOError as error:
+            resp_data = error.read().decode("utf8") if hasattr(error, "read") else str(error)
+            resp_code, headers = getattr(error, "code", None), getattr(error, "headers", None) or {}
+        try:
+            resp_data = json.loads(resp_data) # try to parse json results
+        except ValueError:
+            pass # ignore json parsing errors
+        if depth < 100 and resp_code == 400 and isinstance(resp_data, dict) and resp_data.get("type") == "urn:ietf:params:acme:error:badNonce":
+            raise IndexError(resp_data) # allow 100 retries for bad nonces
+        if resp_code in (200, 201, 204):
+            return resp_data, resp_code, headers
+        retryable = resp_code is None or resp_code in (429, 500, 502, 503)
+        if retryable and attempt < 3:
+            wait = delay
+            retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+            if retry_after is not None and str(retry_after).isdigit():
+                wait = min(int(retry_after), 60)
+            LOGGER.info("Retrying request in %ss after HTTP %s.", wait, resp_code)
+            time.sleep(wait)
+            delay *= 2
+            continue
         raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
-    return resp_data, resp_code, headers
 
 # helper function - make signed requests
 def _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce, depth=0):
@@ -116,10 +130,29 @@ def get_cert_id(cert_path):
     
     return f"{_b64(aki_bytes)}.{_b64(serial_bytes)}"
 
-def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None, profile=None, replaces=None):
-    crts, requests, orders, directory, acct_headers, alg, jwk, nonce = [], [], [], None, None, None, None, [None] # nonce is mutable list for reuse across signed requests
+def get_ari(cert_path, directory_url=DEFAULT_DIRECTORY_URL):
+    """Return ARI renewal info for a PEM certificate (RFC 9773).
 
-    # parse account key to get public key
+    Keys: certId, suggestedWindow, explanationURL, retryAfter.
+    """
+    cid = get_cert_id(cert_path)
+    directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
+    base = directory.get("renewalInfo")
+    if not base:
+        raise ValueError("This ACME directory does not advertise renewalInfo (RFC 9773 ARI not supported by CA)")
+    ari_url = base.rstrip("/") + "/" + cid
+    resp, _, headers = _do_request(ari_url, err_msg="Error fetching ARI renewal info")
+    if not isinstance(resp, dict):
+        raise ValueError("ARI renewal info was not JSON")
+    return {
+        "certId": cid,
+        "suggestedWindow": resp.get("suggestedWindow"),
+        "explanationURL": resp.get("explanationURL"),
+        "retryAfter": headers.get("Retry-After"),
+    }
+
+def _open_account(account_key, directory_url, contact=None):
+    """Parse the account key, fetch the directory, and register. Returns (directory, thumbprint, send)."""
     LOGGER.info("Parsing account key.")
     out = _cmd(["openssl", "rsa", "-in", account_key, "-noout", "-text"], err_msg="OpenSSL Error")
     pub_pattern = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)"
@@ -132,148 +165,177 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
         "kty": "RSA",
         "n": _b64(binascii.unhexlify(re.sub(r"(\s|:)", "", pub_hex).encode("utf-8"))),
     }
-    accountkey_json = json.dumps(jwk, sort_keys=True, separators=(',', ':'))
-    thumbprint = _b64(hashlib.sha256(accountkey_json.encode('utf8')).digest())
+    thumbprint = _b64(hashlib.sha256(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode('utf8')).digest())
 
-    # get the ACME directory of urls
     LOGGER.info("Getting directory.")
     directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
     LOGGER.info("Directory found.")
-
-    # Obtain a nonce once up front; subsequent responses will supply the next nonce (optimization)
+    nonce = [None]
     nonce[0] = _do_request(directory['newNonce'])[2].get('Replay-Nonce')
 
-    # create account, update contact details (if any), and set the global key identifier
     LOGGER.info("Registering account.")
     reg_payload = {"termsOfServiceAgreed": True}
     if contact is not None:
         reg_payload.update({"contact": contact})
-    # newAccount uses acct_headers=None (triggers jwk instead of kid) + the pre-fetched nonce list
     account, resp_code, acct_headers = _send_signed_request(directory['newAccount'], reg_payload, "Error registering", directory, jwk, alg, None, account_key, nonce)
     LOGGER.info("Registered." if resp_code == 201 else "Already registered.")
     if contact is not None and resp_code != 201 and not set(contact) == set(account['contact']):
         account, _, _ = _send_signed_request(acct_headers['Location'], {"contact": contact}, "Error updating contact details", directory, jwk, alg, acct_headers, account_key, nonce)
         LOGGER.info("Updated contact details: %s.", "; ".join(account['contact']))
 
-    # Local short-form sender (closes over directory/jwk/alg/acct_headers/account_key/nonce).
-    # All post-account signed requests (newOrder, auths, challenges, finalize, downloads) use this.
-    def _send(url, payload, err_msg):
+    def send(url, payload, err_msg):
         return _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce)
+    return directory, thumbprint, send
 
-    # find domains
+def _identifiers(text):
+    """Return (identifiers, dns_names, has_ip) from `openssl req -text` output."""
+    identifiers, seen, domains = [], set(), []
+
+    def add(kind, value):
+        if (kind, value) in seen:
+            return
+        seen.add((kind, value))
+        identifiers.append({"type": kind, "value": value})
+        if kind == "dns":
+            domains.append(value)
+
+    common_name = re.search(r"Subject:.*? CN\s?=\s?([^\s,;/]+)", text)
+    if common_name is not None:
+        add("dns", common_name.group(1))
+    alt_names = re.search(r"X509v3 Subject Alternative Name: (?:critical)?\n +([^\n]+)\n", text, re.MULTILINE | re.DOTALL)
+    has_ip = False
+    if alt_names is not None:
+        for san in alt_names.group(1).split(", "):
+            if san.startswith("DNS:"):
+                add("dns", san[4:])
+            elif san.startswith("IP Address:") or san.startswith("IP:"):
+                add("ip", san.split(":", 1)[1].strip())
+                has_ip = True
+    return identifiers, domains, has_ip
+
+def _replaces_for(replaces, csrfile):
+    """replaces is a CertID string for every CSR, or a dict of CSR path to CertID."""
+    if isinstance(replaces, dict):
+        return replaces.get(csrfile) or None
+    return replaces
+
+def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None, hook=None, challenge_type=None, profile=None, replaces=None):
+    """Issue each CSR. replaces is a CertID for every order, or a dict of CSR path to CertID."""
+    directory, thumbprint, _send = _open_account(account_key, directory_url, contact)
+    failures = []
+    # RFC 8555 §7.4: one order, one CSR, posted to that order's finalize URL
+    # while the order is "ready". Finish this order before opening the next
+    # one, or the CA returns the order that is still open. A previous order
+    # leaves the next order's authorizations already valid (§7.1.3).
     for csrfile in csr:
-        LOGGER.info("Parsing CSR %s.", csrfile)
-        out = _cmd(["openssl", "req", "-in", csrfile, "-noout", "-text"], err_msg="Error loading {0}".format(csrfile))
-        domains = set([])
-        common_name = re.search(r"Subject:.*? CN\s?=\s?([^\s,;/]+)", out.decode('utf8'))
-        if common_name is not None:
-            domains.add(common_name.group(1))
-        subject_alt_names = re.search(r"X509v3 Subject Alternative Name: (?:critical)?\n +([^\n]+)\n", out.decode('utf8'), re.MULTILINE | re.DOTALL)
-        if subject_alt_names is not None:
-            for san in subject_alt_names.group(1).split(", "):
-                if san.startswith("DNS:"):
-                    domains.add(san[4:])
-        LOGGER.info("Found domains: %s.", ", ".join(domains))
+        requests = []
+        try:
+            LOGGER.info("Parsing CSR %s.", csrfile)
+            out = _cmd(["openssl", "req", "-in", csrfile, "-noout", "-text"], err_msg="Error loading {0}".format(csrfile))
+            identifiers, _, has_ip = _identifiers(out.decode('utf8'))
+            LOGGER.info("Found identifiers: %s.", ", ".join(item["value"] for item in identifiers))
+            order_profile = profile
+            if has_ip:
+                if challenge_type != "http":
+                    raise ValueError("IP address certificates (RFC 8738) require HTTP-01 validation. Use --http-hook.")
+                if not order_profile:
+                    order_profile = "shortlived"
+                    LOGGER.info("IP identifier(s) detected; defaulting to shortlived profile.")
+            LOGGER.info("Creating new order.")
+            order_payload = {"identifiers": identifiers}
+            if order_profile:
+                order_payload["profile"] = order_profile
+                LOGGER.info("Requesting profile: %s", order_profile)
+            cert_id = _replaces_for(replaces, csrfile)
+            if cert_id:
+                order_payload["replaces"] = cert_id
+                LOGGER.info("Requesting replacement of CertID: %s", cert_id)
+            order, _, order_headers = _send(directory['newOrder'], order_payload, "Error creating new order")
+            order_url, finalize_url = str(order_headers['Location']), str(order['finalize'])
+            LOGGER.info("Order created. Server selected profile: %s", order['profile']) if 'profile' in order else LOGGER.info("Order created.")
+            for auth_url in order['authorizations']:
+                authorization, _, _ = _send(auth_url, None, "Error getting challenges")
+                domain = authorization['identifier']['value']
+                if authorization['status'] == 'valid':
+                    LOGGER.info("Domain %s already verified. Skipping.", domain)
+                    continue
+                LOGGER.info("Setting up challenge for %s.", domain)
+                if challenge_type == 'http':
+                    challenge = [c for c in authorization['challenges'] if c['type'] == "http-01"][0]
+                    token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
+                    content = "{0}.{1}".format(token, thumbprint)
+                elif challenge_type == 'dns':
+                    challenge = [c for c in authorization['challenges'] if c['type'] == "dns-01"][0]
+                    token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
+                    content = _b64(hashlib.sha256("{0}.{1}".format(token, thumbprint).encode('utf8')).digest())
+                elif challenge_type == 'onion-csr-01':
+                    # Hook prints the base64 DER CSR. It is posted as the challenge response.
+                    challenge = [c for c in authorization['challenges'] if c['type'] == "onion-csr-01"][0]
+                    token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
+                    hook_out = _cmd(hook + ["setup", domain, token, ""], err_msg="Hook Script Error")
+                    content = hook_out.decode('utf8').strip() if hook_out else ""
+                else:
+                    raise ValueError("Unknown challenge type: {0}".format(challenge_type))
+                if challenge_type != 'onion-csr-01':
+                    _do_hook(hook, "setup", [domain, token, content])
+                requests.append((domain, token, content, challenge['url'], auth_url))
+            if requests:
+                _do_hook(hook, "activate", [])
+                LOGGER.info("Activated challenges.")
+                if not disable_check:
+                    for (domain, token, content, challenge_url, auth_url) in requests:
+                        LOGGER.info("checking challenge for domain %s", domain)
+                        _do_hook(hook, "check", [domain, token, content])
+                for (domain, token, content, challenge_url, auth_url) in requests:
+                    LOGGER.info("Notifying that challenge for %s is ready.", domain)
+                    _send(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
+                for (domain, token, content, challenge_url, auth_url) in requests:
+                    LOGGER.info("Verifying %s.", domain)
+                    authorization = _poll_until_not(auth_url, ["pending"], "Error checking challenge status for {0}".format(domain), sender=_send)
+                    if authorization['status'] != "valid":
+                        raise ValueError("Challenge did not pass for {0}: {1}".format(domain, authorization))
+                    LOGGER.info("Domain %s verified.", domain)
+                    _do_hook(hook, "remove", [domain, token, content])
+                _do_hook(hook, "finish", [])
+            LOGGER.info("Signing certificate for CSR %s.", csrfile)
+            csr_der = _cmd(["openssl", "req", "-in", csrfile, "-outform", "DER"], err_msg="DER Export Error")
+            _send(finalize_url, {"csr": _b64(csr_der)}, "Error finalizing order")
+            finished = _poll_until_not(order_url, ["pending", "processing"], "Error checking order status", sender=_send)
+            if finished['status'] != "valid":
+                raise ValueError("Order failed: {0}".format(finished))
+            certificate_pem, _, _ = _send(str(finished['certificate']), None, "Certificate download failed")
+            LOGGER.info("Certificate signed for %s.", csrfile)
+            _do_hook(hook, 'write', [csrfile], stdin=subprocess.PIPE, cmd_input=certificate_pem.encode('utf8'), echo=True)
+        except (ValueError, OSError, AssertionError, IndexError, KeyError) as error:
+            LOGGER.error("Could not issue %s: %s", csrfile, error)
+            failures.append(csrfile)
+            for (domain, token, content, challenge_url, auth_url) in requests:
+                try:
+                    _do_hook(hook, "remove", [domain, token, content])
+                except OSError as remove_error:
+                    LOGGER.error("Could not remove challenge for %s: %s", domain, remove_error)
+            if requests:
+                try:
+                    _do_hook(hook, "finish", [])
+                except OSError as finish_error:
+                    LOGGER.error("Finish failed: %s", finish_error)
 
-        # create a new order
-        LOGGER.info("Creating new order.")
-        order_payload = {"identifiers": [{"type": "dns", "value": d} for d in domains]}
-        if profile:
-            order_payload["profile"] = profile
-            LOGGER.info("Requesting profile: %s", profile)
-        if replaces:
-            order_payload["replaces"] = replaces
-            LOGGER.info("Requesting replacement of CertID: %s", replaces)
+    if failures:
+        unique = []
+        for item in failures:
+            if item not in unique:
+                unique.append(item)
+        raise RuntimeError("Certificate issuance failed for: {0}".format(", ".join(str(item) for item in unique)))
 
-        order, _, order_headers = _send(directory['newOrder'], order_payload, "Error creating new order")
-        LOGGER.info("Order created. Server selected profile: %s", order['profile']) if 'profile' in order else LOGGER.info("Order created.")
-        orders += [(order, order_headers, csrfile)]
-
-        # get the authorizations that need to be completed
-        for auth_url in order['authorizations']:
-            authorization, _, _ = _send(auth_url, None, "Error getting challenges")
-            domain = authorization['identifier']['value']
-            if authorization['status'] == 'valid':
-                LOGGER.info("Domain %s already verified. Skipping.", domain)
-                continue
-            LOGGER.info("Setting up challenge for %s.", domain)
-
-            # find the correct challenge type and hook script
-            if challenge_type == 'http': # HTTP-01
-                challenge = [c for c in authorization['challenges'] if c['type'] == "http-01"][0]
-                token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
-                content = "{0}.{1}".format(token, thumbprint)
-            elif challenge_type == 'dns': # DNS-01
-                challenge = [c for c in authorization['challenges'] if c['type'] == "dns-01"][0]
-                token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
-                keyauthorization = "{0}.{1}".format(token, thumbprint)
-                content = _b64(hashlib.sha256(keyauthorization.encode('utf8')).digest())
-
-            # call hook script
-            _do_hook(hook, "setup", [domain, token, content])
-            requests += [(domain, token, content, challenge['url'], auth_url, order)]
-
-    # call hook script to activate challenge
-    _do_hook(hook, "activate", [])
-    LOGGER.info("Activated challenges.")
-
-    # check that the challenge is in place and accessible
-    if not disable_check:
-        for (domain, token, content, challenge_url, auth_url, order) in requests:
-            try:
-                LOGGER.info("checking challenge for domain %s", domain)
-                _do_hook(hook, "check", [domain, token, content])
-            except IOError:
-                LOGGER.error("Check failed for domain %s.", domain)
-                orders = [(o, oh, c) for (o, oh, c) in orders if o != order] # remove the failed order
-
-    # says the challenge is ready for checking
-    for (domain, token, content, challenge_url, auth_url, order) in requests:
-        LOGGER.info("Notifying that challenge for %s is ready.", domain)
-        _send(challenge_url, {}, "Error submitting challenges: {0}".format(domain))
-
-    # check that they challenge has been completed
-    for (domain, token, content, challenge_url, auth_url, order) in requests:
-        LOGGER.info("Verifying %s.", domain)
-        authorization = _poll_until_not(auth_url, ["pending"], "Error checking challenge status for {0}".format(domain), sender=_send)
-        if authorization['status'] != "valid":
-            LOGGER.error("Challenge did not pass for %s: %s", domain, authorization)
-            orders = [(o, oh, c) for (o, oh, c) in orders if o != order] # remove the failed order
-        else:
-            LOGGER.info("Domain %s verified.", domain)
-
-        # remove challenge
-        LOGGER.info("removing challenge for domain %s", domain)
-        _do_hook(hook, "remove", [domain, token, content])
-
-    # finish the cleanup
-    _do_hook(hook, "finish", [])
-
-    # finalize each order where all challenges passed
-    finalize_urls = [] 
-
-    for (order, order_headers, csrfile) in orders:
-        LOGGER.info("Signing certificate for CSR %s.", csrfile)
-        csr_der = _cmd(["openssl", "req", "-in", csrfile, "-outform", "DER"], err_msg="DER Export Error")
-
-        # Only finalize each order once (multiple CSRs can be signed by the same order)
-        if order['finalize'] not in finalize_urls:
-            _send(order['finalize'], {"csr": _b64(csr_der)}, "Error finalizing order")
-            finalize_urls.append(order['finalize'])
-
-        # poll the order to monitor when it's done
-        order = _poll_until_not(order_headers['Location'], ["pending", "processing"], "Error checking order status", sender=_send)
-        if order['status'] != "valid":
-            raise ValueError("Order failed: {0}".format(order))
-
-        # download the certificate
-        certificate_pem, _, _ = _send(order['certificate'], None, "Certificate download failed")
-        LOGGER.info("Certificate signed for %s.", csrfile)
-        crts += [(csrfile, certificate_pem)]
-
-    # output result via the hook scripts
-    for (csr, crt) in crts:
-        _do_hook(hook, 'write', [csr], stdin=subprocess.PIPE, cmd_input=crt.encode('utf8'), echo=True)
+def revoke_cert(account_key, certificate, directory_url=DEFAULT_DIRECTORY_URL, reason=None):
+    """Revoke a PEM certificate with the ACME account key (RFC 8555 section 7.6)."""
+    directory, _, send = _open_account(account_key, directory_url)
+    der = _cmd(["openssl", "x509", "-in", certificate, "-outform", "DER"], err_msg="DER export error")
+    payload = {"certificate": _b64(der)}
+    if reason is not None:
+        payload["reason"] = int(reason)
+    send(directory["revokeCert"], payload, "Error revoking certificate")
+    LOGGER.info("Revoked %s.", certificate)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -299,7 +361,7 @@ def main(argv=None):
     sign_parser.add_argument("--contact", metavar="CONTACT", default=None, nargs="*", help="Contact details (e.g. mailto:aaa@bbb.com) for your account-key")
     sign_parser.add_argument("--csr", required=True, action="append", help="path to your certificate signing request, can be given multiple times")
     sign_parser.add_argument("--profile", help="ACME profile name (see 'profiles' command). Optional; server chooses default if omitted.")
-    sign_parser.add_argument("--replaces", help="RFC 9773 CertID of certificate to replace (for renewal). Optional; if omitted, a new certificate will be issued instead of renewing an existing one.")
+    sign_parser.add_argument("--replaces", help="RFC 9773 CertID applied to every order in this invocation. The Python API also accepts a dict of CSR path to CertID.")
     hookgroup = sign_parser.add_mutually_exclusive_group(required=True)
     hookgroup.add_argument("--dns-hook", help="the hook script to call for DNS-01 type challenges")
     hookgroup.add_argument("--http-hook", help="the hook script to call for HTTP-01 type challenges")
@@ -311,9 +373,11 @@ def main(argv=None):
     certid_parser = subparsers.add_parser("certid", help="Compute ARI CertID (RFC 9773) from a certificate")
     certid_parser.add_argument("certificate", help="path to PEM certificate")  # positional: the only argument for this command
 
-    # === Placeholders for future features (keep minimal to preserve auditability) ===
-    subparsers.add_parser("revoke", help="Revoke certificate (ACME revokeCert; placeholder - not implemented)")
-    subparsers.add_parser("keychange", help="Account key rollover (ACME keyChange; placeholder - not implemented)")
+    revoke_parser = subparsers.add_parser("revoke", help="Revoke a certificate with the account key")
+    revoke_parser.add_argument("--account-key", required=True, help="path to your ACME account private key")
+    revoke_parser.add_argument("certificate", help="path to the PEM certificate")
+    revoke_parser.add_argument("--reason", type=int, help="RFC 5280 reason code; the CA rejects an unknown code")
+    subparsers.add_parser("keychange", help="Account key rollover (ACME keyChange; not implemented)")
     ari_parser = subparsers.add_parser("ari", help="Query ARI renewal window (RFC 9773; relies on certid)")
     ari_parser.add_argument("certificate", help="path to PEM certificate (computes CertID internally)")
 
@@ -340,14 +404,18 @@ def main(argv=None):
             replaces=args.replaces
         )
     elif args.command == "revoke":
-        raise NotImplementedError("revoke not implemented (placeholder per plan; see TODO.md and RFC 8555 §7.6)")
+        revoke_cert(args.account_key, args.certificate, args.directory_url, args.reason)
     elif args.command == "keychange":
-        raise NotImplementedError("keychange not implemented (placeholder per plan; see TODO.md and RFC 8555 §7.3.5)")
+        raise NotImplementedError("keychange not implemented (see TODO.md and RFC 8555 section 7.3.5)")
     elif args.command == "ari":
-        # Demonstrate reliance on get_cert_id + surface a usable CertID immediately.
-        cid = get_cert_id(args.certificate)
-        print(f"CertID: {cid}")
-        raise NotImplementedError("ari query not implemented (placeholder; directory['renewalInfo'] + GET will be added later)")
+        data = get_ari(args.certificate, args.directory_url)
+        window = data.get("suggestedWindow") or {}
+        LOGGER.info("Suggested renewal window for %s: %s to %s", args.certificate, window.get("start"), window.get("end"))
+        if data.get("explanationURL"):
+            LOGGER.info("Explanation: %s", data["explanationURL"])
+        if data.get("retryAfter"):
+            LOGGER.info("Retry-After: %s", data["retryAfter"])
+        LOGGER.info("CertID: %s", data.get("certId"))
 
 if __name__ == "__main__": # pragma: no cover
     main(sys.argv[1:])

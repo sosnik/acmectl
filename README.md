@@ -14,7 +14,7 @@ To be sure, those other clients are more full-featured, but I have been historic
 * Separate the concerns of interacting with ACME API and responding to challenges (+ my cloudns hook script is provided).
 * Supports HTTP-01 and DNS-01 challenges, allowing for wildcard certificates.
 * Helper functions to generate keys and CSRs so that you don't have to remember how to do it / check docs every time you spin up a new server.
-* Unattended mode for bulk renewal of all of your certificates
+* Unattended mode issues any enrolled CSR that has no certificate yet, and renews a certificate when its ARI window is open. When the CA has no renewal window, renewal happens within `RENEW_THRESHOLD` days of expiry.
 * WONTFIX: I will assume that people running this script know enough to debug things themselves and won't need strict input validation for commands. 
 # Quickstart
 ```Shell
@@ -24,24 +24,25 @@ sudo visudo -f /etc/sudoers.d/acmectl
 #	# Allow acmectl account to reload nginx after renewing certs
 #	acmectl ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
 
-# Forward Secrecy
-openssl dhparam -out /home/acmectl/dhparam.pem 4096
+python3 acmectl.py quickstart
+# answer the prompts. This generates the account key, dhparam, certificate keys, and CSRs,
+# links the CSRs into by-hook/, and requests the certificate.
 
-# Create a file called <basename>.san in the certs/ directory listing domain names to be included in a certificate signing request, one per line and up to 100 entries. Then:
-python3 acmectl.py quickstart <name>
-# enable the service
+# enable the daily check
 sudo cp /home/acmectl/acmectl.timer /home/acmectl/acmectl.service /etc/systemd/system/
-sudo systemctl enable acmectl.service
-sudo systemctl start acmectl.service
+sudo systemctl enable --now acmectl.timer
 ```
 
 # Usage
-You can define default HTTP and DNS hooks in the `acmectl.conf` file.
-For unattended use, link the CSRs from `certs/` into `by-hook/dns` or `by-hook/http/` as appropriate.
+Default hooks, the account key, the expiry threshold, and the directory URLs live in `acmectl.conf` beside the script. `--config` selects a different file. An empty `WORKDIR` means the directory that contains the config.
 
-Subject Alternate Name configurations must end with `.san`, must be placed in the `certs/` folder, and list the desired alternate names for the certificate, one per line, 100 items max. Wildcards are supported.
+`quickstart` links each new CSR into `by-hook/` for the daily run. To enroll a certificate you created with `genkey` / `gencsr` / `getone`, link its CSR into `by-hook/dns/` or `by-hook/http/` to use the default hook, or into `by-hook/<dns|http>/<hook-filename>.d/` to select another script from `hooks/<dns|http>/`.
 
-`eaxample.san`:
+The current certificate for `certs/example.rsa.csr` is `certs/example.rsa.crt`. A hook that writes the PEM beside the CSR path is also recognized.
+
+Subject Alternate Name files end with `.san`, live in `certs/`, and list one DNS name per line. Wildcards are supported.
+
+`example.san`:
 
 ```
 example.com
@@ -50,32 +51,19 @@ example.net
 
 ```
 
-CLI usage:
-
 ```Shell
-usage: acmectl.py [-h] [-q] [-t] [-e {le_prod,le_staging,buypass,zerossl,sectigo}] {genkey,gencsr,getone,quickstart,qs,unattended} ...
-
-Wrapper/convenience script for acme-hooked.py.
-
-positional arguments:
-  {genkey,gencsr,getone,quickstart,qs,unattended}
-                        sub-command help
-    genkey              Generate RSA and/or ECDSA key
-    gencsr              Generate CSR
-    getone              Get a single certificate
-    quickstart, qs      Quickstart. Alias for genkey, gencsr, getone. Will also generate an account key if it doesn't exist.
-    unattended          Renew certificates without user interaction
-
-options:
-  -h, --help            show this help message and exit
-  -q, --quiet           suppress output except for errors
-  -t, --test, --debug   test mode: enable verbose output and use LE staging endpoint
-  -e {le_prod,le_staging,buypass,zerossl,sectigo}, --endpoint {le_prod,le_staging,buypass,zerossl,sectigo}
-                        ACME directory endpoint to use (defined in acme.conf)
+acmectl.py quickstart
+acmectl.py genkey NAME [--mode rsa|ecdsa|both]
+acmectl.py gencsr NAME
+acmectl.py getone NAME (--dns [SCRIPT] | --http [SCRIPT])
+acmectl.py unattended [--dry-run]
+acmectl.py revoke CERT [--reason N]
+acmectl.py ari CERT
+acmectl.py profiles
 ```
 
-⚠️ Argument order is important for `getone` and `quickstart` when passing `--dns|http-[hook]` without a value and relying on the defaults.
+`getone NAME --dns` uses `DNS_HOOK`. Put the name before the hook flag. `--dry-run` prints `ISSUE`, `RENEW`, or `SKIP` and does not sign. `-t` uses the Let's Encrypt staging directory. `-e` selects another directory named in the config (`LE_PROD`, `LE_STAGING`, `BUYPASS`, `ZEROSSL`, `SECTIGO`).
 
-Proper usage is: `acmectl.py [-t] getone [-h] name (--dns-hook [DNS_HOOK] | --http-hook [HTTP_HOOK])`
+The timer runs `unattended` once a day. A certificate inside its ARI window is renewed. If the CA has no renewal window, a certificate within `RENEW_THRESHOLD` days of expiry is renewed. Anything else is left alone. A CSR with no certificate yet is issued.
 
  

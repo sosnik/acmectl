@@ -1,8 +1,8 @@
 [Unit]
-Description=Run acmectl renewal monthly
+Description=Daily ACME certificate check
 
 [Timer]
-OnCalendar=monthly
+OnCalendar=daily
 Persistent=true
 
 [Install]

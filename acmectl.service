@@ -6,4 +6,4 @@ User=acmectl
 Group=acmectl
 Type=simple
 WorkingDirectory=/home/acmectl/
-ExecStart=/home/acmectl/acmectl.py unattended
+ExecStart=/usr/bin/env python3 /home/acmectl/acmectl.py unattended

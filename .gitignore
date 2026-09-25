@@ -1,3 +1,4 @@
+__pycache__/
 legacy/
 hooks/dns/*.conf
 hooks/http/*.conf
