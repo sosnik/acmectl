@@ -1,0 +1,52 @@
+# Host ports and the bridge addresses come from run.sh.
+# ${VAR:?} fails the parse when the variable is unset or empty.
+name: acmectl-pebble
+services:
+  pebble:
+    # Index digest from `docker buildx imagetools inspect` for tag 2.10.1.
+    image: ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
+    command:
+      - -config
+      - /pebble-config.json
+      - -strict=false
+      - -dnsserver
+      - ${ACMECTL_IP:?}:8053
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    volumes:
+      - ./pebble-config.json:/pebble-config.json:ro
+    ports:
+      - "127.0.0.1:${ACMECTL_DIR_PORT:?}:14000"
+      - "127.0.0.1:${ACMECTL_MGMT_PORT:?}:15000"
+    networks:
+      acmenet:
+        ipv4_address: ${ACMECTL_PEBBLE_IP:?}
+  challtestsrv:
+    # Index digest from `docker buildx imagetools inspect` for tag 2.10.1.
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b
+    command:
+      - -defaultIPv6
+      - ""
+      - -defaultIPv4
+      - ${ACMECTL_IP:?}
+      - -http01
+      - :5002
+      - -management
+      - :8055
+      - -https01
+      - ""
+      - -tlsalpn01
+      - ""
+    ports:
+      - "127.0.0.1:${ACMECTL_HTTP_PORT:?}:5002"
+      - "127.0.0.1:${ACMECTL_CHALL_MGMT_PORT:?}:8055"
+    networks:
+      acmenet:
+        ipv4_address: ${ACMECTL_IP:?}
+networks:
+  acmenet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${ACMECTL_SUBNET:?}
