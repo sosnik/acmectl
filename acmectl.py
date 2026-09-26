@@ -94,6 +94,28 @@ def genkey(workdir, mode, name, curve):
         if eckey.stderr.strip():
             LOGGER.info(eckey.stderr.decode(errors="replace").strip())
 
+def _san_part(item):
+    """A .san line is DNS:name, IP:address, or a bare DNS name."""
+    if item.upper().startswith("IP:"):
+        return "IP:" + item.split(":", 1)[1].strip()
+    if item.upper().startswith("DNS:"):
+        return "DNS:" + item.split(":", 1)[1].strip()
+    return "DNS:" + item
+
+def csr_has_ip(path):
+    result = subprocess.run(["openssl", "req", "-in", path, "-noout", "-text"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or "Cannot read {0}".format(path))
+    return "IP Address:" in result.stdout
+
+def profile_for(directory_url, profile, has_ip):
+    # Let's Encrypt issues IP certificates only under its shortlived profile.
+    # RFC 8738 does not define a profile. Other directories, including Pebble, keep the caller's choice.
+    if has_ip and not profile and "letsencrypt.org" in directory_url:
+        LOGGER.info("Let's Encrypt IP certificate; requesting the shortlived profile.")
+        return "shortlived"
+    return profile
+
 def gencsr(workdir, name):
     san_path = os.path.join(workdir, "certs", name + ".san")
     if not os.path.isfile(san_path):
@@ -102,7 +124,7 @@ def gencsr(workdir, name):
         names = [line.strip() for line in handle if line.strip()]
     if not names:
         die("SAN file {0} is empty".format(san_path))
-    extension = "subjectAltName = " + ",".join("DNS:" + item for item in names)
+    extension = "subjectAltName = " + ",".join(_san_part(item) for item in names)
     wrote = False
     for kind in ("rsa", "ecdsa"):
         key = os.path.join(workdir, "certs", "{0}.{1}.key".format(name, kind))
@@ -243,13 +265,17 @@ def getone(cfg, workdir, name, kind, script, directory_url, profile):
     if not os.path.isfile(hook):
         die("Missing hook script: {0}".format(hook))
     csrs = csrs_for(workdir, name)
+    has_ip = any(csr_has_ip(csr) for csr in csrs)
+    if has_ip and kind != "http":
+        die("IP identifiers require an HTTP-01 hook (RFC 8738).")
+    profile = profile_for(directory_url, resolved_profile(cfg, profile), has_ip)
     replaces = {}
     for csr in csrs:
         cert = cert_for(workdir, csr)
         if cert:
             replaces[csr] = acme_hooked.get_cert_id(cert)
             LOGGER.info("Replacing %s", cert)
-    issue(cfg, workdir, directory_url, kind, hook, csrs, resolved_profile(cfg, profile), replaces)
+    issue(cfg, workdir, directory_url, kind, hook, csrs, profile, replaces)
 
 def enroll(workdir, kind, script, csr, default_script):
     """Link a CSR into by-hook so the daily run can find it."""
@@ -301,7 +327,7 @@ def ask(label, default=None):
     return value or default
 
 def ask_names():
-    print("DNS names, one per line. End with an empty line.")
+    print("Names, one per line. Prefix an address with IP:. End with an empty line.")
     names = []
     while True:
         try:
@@ -312,7 +338,7 @@ def ask_names():
             break
         names.append(line)
     if not names:
-        die("At least one DNS name is required")
+        die("At least one name is required")
     return names
 
 def quickstart(cfg, workdir, directory_url):
@@ -325,9 +351,12 @@ def quickstart(cfg, workdir, directory_url):
     mode = ask("Key type (rsa, ecdsa, both)", "both")
     if mode not in ("rsa", "ecdsa", "both"):
         die("Key type must be rsa, ecdsa, or both")
-    kind = ask("Challenge type (dns or http)", "dns")
+    has_ip = any(item.upper().startswith("IP:") for item in names)
+    kind = ask("Challenge type (dns or http)", "http" if has_ip else "dns")
     if kind not in ("dns", "http"):
         die("Challenge type must be dns or http")
+    if has_ip and kind != "http":
+        die("IP identifiers require an HTTP-01 hook (RFC 8738).")
     default_hook = cfg["general"]["DNS_HOOK" if kind == "dns" else "HTTP_HOOK"]
     script = ask("Hook script", default_hook)
     san_path = os.path.join(workdir, "certs", name + ".san")
@@ -368,6 +397,7 @@ def unattended(cfg, workdir, directory_url, dry_run=False):
             LOGGER.error("Missing hook script: %s", hook)
             failed = True
         due, replaces = [], {}
+        group_has_ip = False
         for csr in csrs:
             try:
                 action, cert_id = decide(cert_for(workdir, csr), directory_url, threshold, ari_state)
@@ -378,13 +408,19 @@ def unattended(cfg, workdir, directory_url, dry_run=False):
             report(action, csr, hook, dry_run)
             if action == "skip":
                 continue
+            if csr_has_ip(csr):
+                if kind != "http":
+                    LOGGER.error("IP identifiers require an HTTP-01 hook (RFC 8738): %s", csr)
+                    failed = True
+                    continue
+                group_has_ip = True
             due.append(csr)
             if cert_id:
                 replaces[csr] = cert_id
         if dry_run or not due or not hook_ok:
             continue
         try:
-            issue(cfg, workdir, directory_url, kind, hook, due, profile, replaces)
+            issue(cfg, workdir, directory_url, kind, hook, due, profile_for(directory_url, profile, group_has_ip), replaces)
         except (RuntimeError, OSError, ValueError) as error:
             LOGGER.error("Hook group %s failed: %s", hook, error)
             failed = True

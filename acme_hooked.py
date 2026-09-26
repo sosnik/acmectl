@@ -188,7 +188,7 @@ def _open_account(account_key, directory_url, contact=None):
     return directory, thumbprint, send
 
 def _identifiers(text):
-    """Return (identifiers, dns_names, has_ip) from `openssl req -text` output."""
+    """Return (identifiers, dns_names) from `openssl req -text` output."""
     identifiers, seen, domains = [], set(), []
 
     def add(kind, value):
@@ -203,15 +203,13 @@ def _identifiers(text):
     if common_name is not None:
         add("dns", common_name.group(1))
     alt_names = re.search(r"X509v3 Subject Alternative Name: (?:critical)?\n +([^\n]+)\n", text, re.MULTILINE | re.DOTALL)
-    has_ip = False
     if alt_names is not None:
         for san in alt_names.group(1).split(", "):
             if san.startswith("DNS:"):
                 add("dns", san[4:])
             elif san.startswith("IP Address:") or san.startswith("IP:"):
                 add("ip", san.split(":", 1)[1].strip())
-                has_ip = True
-    return identifiers, domains, has_ip
+    return identifiers, domains
 
 def _replaces_for(replaces, csrfile):
     """replaces is a CertID string for every CSR, or a dict of CSR path to CertID."""
@@ -232,15 +230,9 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
         try:
             LOGGER.info("Parsing CSR %s.", csrfile)
             out = _cmd(["openssl", "req", "-in", csrfile, "-noout", "-text"], err_msg="Error loading {0}".format(csrfile))
-            identifiers, _, has_ip = _identifiers(out.decode('utf8'))
+            identifiers, _ = _identifiers(out.decode('utf8'))
             LOGGER.info("Found identifiers: %s.", ", ".join(item["value"] for item in identifiers))
             order_profile = profile
-            if has_ip:
-                if challenge_type != "http":
-                    raise ValueError("IP address certificates (RFC 8738) require HTTP-01 validation. Use --http-hook.")
-                if not order_profile:
-                    order_profile = "shortlived"
-                    LOGGER.info("IP identifier(s) detected; defaulting to shortlived profile.")
             LOGGER.info("Creating new order.")
             order_payload = {"identifiers": identifiers}
             if order_profile:

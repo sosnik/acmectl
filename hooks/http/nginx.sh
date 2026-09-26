@@ -44,9 +44,14 @@ check()
 	# check that challenge is ready for the ACSD server
 	# waiting for the challenge to become ready should be done here
 	# exit with 0 if check succeeds, otherwise != 0
+	# RFC 8738 §5: the Host for an IP identifier is the address itself. IPv6 needs brackets.
+	host="${domain}"
+	if [[ "${domain}" == *:* ]]; then
+		host="[${domain}]"
+	fi
 	timeout=${CHECKTIMEOUT}
-	while [[ timeout -gt 0 ]]; do
-		response="$(curl --insecure "http://${domain}/.well-known/acme-challenge/${token}")"
+	while [[ ${timeout} -gt 0 ]]; do
+		response="$(curl --insecure "http://${host}/.well-known/acme-challenge/${token}")"
 		[[ "${response}" == "${content}" ]] && exit 0
 		timeout=$(($timeout - 3))
 		sleep 3

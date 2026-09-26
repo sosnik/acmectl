@@ -40,7 +40,7 @@ Default hooks, the account key, the expiry threshold, and the directory URLs liv
 
 The current certificate for `certs/example.rsa.csr` is `certs/example.rsa.crt`. A hook that writes the PEM beside the CSR path is also recognized.
 
-Subject Alternate Name files end with `.san`, live in `certs/`, and list one DNS name per line. Wildcards are supported.
+Subject Alternate Name files end with `.san` and live in `certs/`. A bare line is a DNS name. `DNS:` and `IP:` are explicit. Wildcards are DNS names. [RFC 8738](https://www.rfc-editor.org/rfc/rfc8738) uses an `ip` identifier and HTTP-01. DNS-01 cannot validate an address. Let's Encrypt also requires its `shortlived` profile for an IP certificate. That profile is not sent to any other directory.
 
 `example.san`:
 
@@ -48,6 +48,7 @@ Subject Alternate Name files end with `.san`, live in `certs/`, and list one DNS
 example.com
 example.net
 *.example.com
+IP:192.0.2.1
 
 ```
 
@@ -65,5 +66,11 @@ acmectl.py profiles
 `getone NAME --dns` uses `DNS_HOOK`. Put the name before the hook flag. `--dry-run` prints `ISSUE`, `RENEW`, or `SKIP` and does not sign. `-t` uses the Let's Encrypt staging directory. `-e` selects another directory named in the config (`LE_PROD`, `LE_STAGING`, `BUYPASS`, `ZEROSSL`, `SECTIGO`).
 
 The timer runs `unattended` once a day. A certificate inside its ARI window is renewed. If the CA has no renewal window, a certificate within `RENEW_THRESHOLD` days of expiry is renewed. Anything else is left alone. A CSR with no certificate yet is issued.
+
+# Testing with Pebble
+
+Pebble accepts an `ip` identifier. Its HTTP-01 check requests `http://<address>:<httpPort>/.well-known/acme-challenge/<token>` and, when that address is already an IP, dials it directly. TLS-ALPN-01 has its own IP path. DNS-01 still treats the value as a hostname, which RFC 8738 does not allow for an address.
+
+Get Pebble by cloning `https://github.com/letsencrypt/pebble` or by downloading a release archive and unpacking it. From that directory, `docker compose up` starts Pebble and `pebble-challtestsrv`. Add an endpoint for `https://localhost:14000/dir` and select it with `-e`. Put an address Pebble can dial in the CSR, such as `127.0.0.1`, and serve the token on Pebble's HTTP port (5002 in the stock compose file). `pebble-challtestsrv`'s management API on port 8055 can install that token, so the test does not need a public HTTP listener.
 
  

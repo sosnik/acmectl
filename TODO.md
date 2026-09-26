@@ -63,7 +63,7 @@ From the [upstream acme_hooked TODO](https://raw.githubusercontent.com/mmorak/ac
 
 - [ ] [DNS-PERSIST-01](https://letsencrypt.org/2026/02/18/dns-persist-01) - this standard is WIP, originally due to hit production in Q2 2026 which is almost over at time of writing.  No point adding implementation until finalized.
 - [x] [ACME Profiles extension](https://datatracker.ietf.org/doc/draft-ietf-acme-profiles/) - currently "just works(TM)".  I've added profile query and profile selection but I don't validate the newOrder response because I don't see much of a need for that.   
-- [ ] [RFC 8738 / IP Identifier Validation Extension](https://www.rfc-editor.org/rfc/rfc8738.html) - changes needed.  The challenge methods are the same but the payload is different IIUC (i.e. identifier:ip, instead of identifier:dns)
+- [x] [RFC 8738 / IP Identifier Validation Extension](https://www.rfc-editor.org/rfc/rfc8738.html) — `IP:` lines become identifier type `ip`. HTTP-01 only. TLS-ALPN-01 is not implemented.
 - [ ] [RFC 8555 (main) missing features](https://www.rfc-editor.org/rfc/rfc8555.html) - some features from the principal RFC are not implemented.  I might not add them for minimalizm but if I do a catalogue is not unwarranted
   - [ ] KeyChange
   - [ ] Account deactivation
