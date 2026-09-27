@@ -114,3 +114,5 @@ do
   fi
   sleep 1
 done
+
+bash "$ROOT/issue.sh"
