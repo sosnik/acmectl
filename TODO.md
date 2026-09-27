@@ -1,6 +1,8 @@
 # Todo
 ## Realistic
+General
 
+- [ ] Ongoing: simplify code for readability and auditability.    
 - [x] Implement the new [renewal API](https://datatracker.ietf.org/doc/rfc9773/)
   - The client sends `replaces` (one CertID for every CSR in a call, or a dict of CSR path to CertID). The wrapper reads the ARI window.
   - The timer is daily. Unattended renews when the window is open, otherwise when expiry is inside `RENEW_THRESHOLD` days.
@@ -8,8 +10,8 @@
 - [ ] Consider the upstream TODO for acme-hooked
 - [x] Support supplying a different config file for `acmectl` (`--config`)
 - [x] Support alternate hooks for unattended mode
-  - `by-hook/<dns|http>/<hook-filename>.d/*.csr` selects that hook. Flat `*.csr` files still use `DNS_HOOK` / `HTTP_HOOK`.
-- [x] Implement profile selection
+  - `by-hook/<dns|http>/<hook-filename>.d/*.csr` selects that hook.
+- [x] Implement ACME profile selection (enables IP certificates)
 - [ ] Document running this with cron/alternate init systems not just systemd - I have some hosts running Alpine and I might play with OpenBSD
 - [ ] At the same time document systemd templating / drop-ins for dynamic configyuration on my main hosts? 
 - [x] Support revocation
@@ -21,9 +23,6 @@ acmectl wrapper script
 - [x] Logging is configured before any work; the config path is beside the script unless `--config` is set
 - [x] Unattended mode issues a CSR that has no certificate and renews one that is due
 - [ ] Alerting (ntfy, wall, or a notify hook) when renewal fails
-- 
-
-
 
 ## Aspirational
 
@@ -45,8 +44,9 @@ From the [upstream acme_hooked TODO](https://raw.githubusercontent.com/mmorak/ac
 - [x] don't get new nonce every time, it's always supplied by each request (except the first)
 - [x] poll-until-not can be optimized (request first, wait/assert later)
 - [x] retry requests: 4 attempts, 30s socket timeout, waits of 1s then 2s then 4s (or numeric Retry-After when it is under 60s)
-- [ ] log account ID(?)
-- [ ] testing against [pebble](https://github.com/letsencrypt/pebble)
+- [x] log account ID — `acmectl.py info --account`.
+- [ ] testing against [pebble](https://github.com/letsencrypt/pebble) - in progress.
+  - [ ] Grok added tests for IP issuance, full test suites will come later.  
 - [ ] continuous integration
 - [x] ~~windows/mac support~~ WONTFIX. Use Linux.  Alternatively: Works on WSL for me. 
 - [ ] turn hook argument in python into a python function
@@ -62,9 +62,9 @@ From the [upstream acme_hooked TODO](https://raw.githubusercontent.com/mmorak/ac
 ## Standards compliance
 
 - [ ] [DNS-PERSIST-01](https://letsencrypt.org/2026/02/18/dns-persist-01) - this standard is WIP, originally due to hit production in Q2 2026 which is almost over at time of writing.  No point adding implementation until finalized.
-- [x] [ACME Profiles extension](https://datatracker.ietf.org/doc/draft-ietf-acme-profiles/) - currently "just works(TM)".  I've added profile query and profile selection but I don't validate the newOrder response because I don't see much of a need for that.   
-- [x] [RFC 8738 / IP Identifier Validation Extension](https://www.rfc-editor.org/rfc/rfc8738.html) — `IP:` lines become identifier type `ip`. HTTP-01 only. TLS-ALPN-01 is not implemented.
-- [ ] [RFC 8555 (main) missing features](https://www.rfc-editor.org/rfc/rfc8555.html) - some features from the principal RFC are not implemented.  I might not add them for minimalizm but if I do a catalogue is not unwarranted
+- [x] [ACME Profiles extension](https://datatracker.ietf.org/doc/draft-ietf-acme-profiles/) - currently "just works(TM)".  I've added profile query and profile selection but I don't validate the newOrder response (cf spec) because this would add complexity.  Operator should read logs just in case.   
+- [x] [RFC 8738 / IP Identifier Validation Extension](https://www.rfc-editor.org/rfc/rfc8738.html) — added.  The `.san` file now supports an `IP:` (cf `DNS:`) prefix.  Works with `HTTP-01` challenge for now; TLS-ALPN-01 is not implemented client-wide.
+- [ ] [RFC 8555 (main) missing features](https://www.rfc-editor.org/rfc/rfc8555.html) - some features from the principal RFC are not implemented/partially implemented.  I might not add them for minimalizm but if I do a catalogue is not unwarranted:
   - [ ] KeyChange
   - [ ] Account deactivation
   - [ ] Email change (although that's not relevant now that email notifications have been disabled) 
@@ -77,5 +77,5 @@ From the [upstream acme_hooked TODO](https://raw.githubusercontent.com/mmorak/ac
   - [x] Fetch suggested renewal window
   - [x] Implement wrapper controls that take advantage of ARI (renew once the window is open; batch due CSRs that share a hook) 
 - [ ] [RFC 9799 - ACME for .onion domains](https://datatracker.ietf.org/doc/rfc9799/) - later, much later but should be easy enough because HTTP challenge
-- [ ] [RFC 8823 - ACME for S/MIME certificates](https://datatracker.ietf.org/doc/rfc8823/) - this looks cool and would be useful to me but this is not a Standard and I don't know of anyone actively using or allowing this extension.
-- [ ] [RFC 9115 - Delegated Certificates](https://datatracker.ietf.org/doc/rfc9115/) and [RFC 8739 STAR certificates](https://datatracker.ietf.org/doc/rfc8739/) - investigate these. 
+- [ ] [RFC 8823 - ACME for S/MIME certificates](https://datatracker.ietf.org/doc/rfc8823/) - looks promising but won't implement until it is actually supported by usable and free CAs.
+- [ ] [RFC 9115 - Delegated Certificates](https://datatracker.ietf.org/doc/rfc9115/) and [RFC 8739 STAR certificates](https://datatracker.ietf.org/doc/rfc8739/).  As above, no point implementing until these extensions are supported by live CAs. 

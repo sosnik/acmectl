@@ -9,7 +9,7 @@
 import argparse, subprocess, json, sys, base64, binascii, time, hashlib, re, textwrap, logging, os
 from urllib.request import urlopen, Request
 
-__all__ = ['sign_crts', 'list_profiles', 'get_cert_id', 'get_ari', 'revoke_cert']
+__all__ = ['sign_crts', 'get_directory', 'lookup_account', 'get_cert_id', 'get_ari', 'revoke_cert', 'REVOCATION_REASONS']
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORY_URL = "https://acme-v02.api.letsencrypt.org/directory"
@@ -66,7 +66,10 @@ def _do_request(url, data=None, err_msg="Error", depth=0):
             time.sleep(wait)
             delay *= 2
             continue
-        raise ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
+        failure = ValueError("{0}:\nUrl: {1}\nData: {2}\nResponse Code: {3}\nResponse: {4}".format(err_msg, url, data, resp_code, resp_data))
+        if isinstance(resp_data, dict):
+            failure.body = resp_data
+        raise failure
 
 # helper function - make signed requests
 def _send_signed_request(url, payload, err_msg, directory, jwk, alg, acct_headers, account_key, nonce, depth=0):
@@ -101,17 +104,11 @@ def _poll_until_not(url, pending_statuses, err_msg, sender=None):
         result, _, _ = sender(url, None, err_msg)
     return result
 
-def list_profiles(directory_url=DEFAULT_DIRECTORY_URL):
-    """Informative command: print supported profiles."""
+def get_directory(directory_url=DEFAULT_DIRECTORY_URL):
     directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
-    meta = directory.get("meta", {})
-    profiles = meta.get("profiles", {})
-    if not profiles:
-        LOGGER.info("No profiles advertised by this directory.")
-        return
-    LOGGER.info("Supported ACME profiles:")
-    for name, desc in profiles.items():
-        LOGGER.info(f"  {name}: {desc}")
+    if not isinstance(directory, dict):
+        raise ValueError("ACME directory was not a JSON object")
+    return directory
 
 def get_cert_id(cert_path):
     """Return the ARI CertID (RFC 9773) for a PEM certificate."""
@@ -136,7 +133,7 @@ def get_ari(cert_path, directory_url=DEFAULT_DIRECTORY_URL):
     Keys: certId, suggestedWindow, explanationURL, retryAfter.
     """
     cid = get_cert_id(cert_path)
-    directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
+    directory = get_directory(directory_url)
     base = directory.get("renewalInfo")
     if not base:
         raise ValueError("This ACME directory does not advertise renewalInfo (RFC 9773 ARI not supported by CA)")
@@ -151,24 +148,53 @@ def get_ari(cert_path, directory_url=DEFAULT_DIRECTORY_URL):
         "retryAfter": headers.get("Retry-After"),
     }
 
-def _open_account(account_key, directory_url, contact=None):
-    """Parse the account key, fetch the directory, and register. Returns (directory, thumbprint, send)."""
-    LOGGER.info("Parsing account key.")
+def _account_jwk(account_key):
+    """Return (jwk, alg) for an RSA account key."""
     out = _cmd(["openssl", "rsa", "-in", account_key, "-noout", "-text"], err_msg="OpenSSL Error")
     pub_pattern = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)"
     pub_hex, pub_exp = re.search(pub_pattern, out.decode('utf8'), re.MULTILINE | re.DOTALL).groups()
     pub_exp = "{0:x}".format(int(pub_exp))
     pub_exp = "0{0}".format(pub_exp) if len(pub_exp) % 2 else pub_exp
-    alg = "RS256"
     jwk = {
         "e": _b64(binascii.unhexlify(pub_exp.encode("utf-8"))),
         "kty": "RSA",
         "n": _b64(binascii.unhexlify(re.sub(r"(\s|:)", "", pub_hex).encode("utf-8"))),
     }
+    return jwk, "RS256"
+
+def lookup_account(account_key, directory_url=DEFAULT_DIRECTORY_URL):
+    """Return url, status, and contact for an existing account, or None.
+
+    Posts onlyReturnExisting and does not create an account.
+    """
+    jwk, alg = _account_jwk(account_key)
+    directory = get_directory(directory_url)
+    nonce = [None]
+    try:
+        account, _, headers = _send_signed_request(
+            directory["newAccount"], {"onlyReturnExisting": True}, "Error looking up account",
+            directory, jwk, alg, None, account_key, nonce)
+    except ValueError as error:
+        body = getattr(error, "body", None)
+        if isinstance(body, dict) and str(body.get("type", "")).endswith(":accountDoesNotExist"):
+            return None
+        raise
+    if not isinstance(account, dict):
+        raise ValueError("Account lookup was not a JSON object")
+    return {
+        "url": headers.get("Location"),
+        "status": account.get("status"),
+        "contact": account.get("contact") or [],
+    }
+
+def _open_account(account_key, directory_url, contact=None):
+    """Parse the account key, fetch the directory, and register. Returns (directory, thumbprint, send)."""
+    LOGGER.info("Parsing account key.")
+    jwk, alg = _account_jwk(account_key)
     thumbprint = _b64(hashlib.sha256(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode('utf8')).digest())
 
     LOGGER.info("Getting directory.")
-    directory, _, _ = _do_request(directory_url, err_msg="Error getting directory")
+    directory = get_directory(directory_url)
     LOGGER.info("Directory found.")
     nonce = [None]
     nonce[0] = _do_request(directory['newNonce'])[2].get('Replay-Nonce')
@@ -319,6 +345,48 @@ def sign_crts(account_key, csr, disable_check=False, directory_url=DEFAULT_DIREC
                 unique.append(item)
         raise RuntimeError("Certificate issuance failed for: {0}".format(", ".join(str(item) for item in unique)))
 
+# RFC 8555 section 7.6 refers to RFC 5280 section 5.3.1 for these codes. The CA does not need to publish these in the directory, so they are hard-coded here, but the CA must issue a descriptive error if it rejects one of these reasons. 
+REVOCATION_REASONS = (
+    (0, "unspecified"),
+    (1, "keyCompromise"),
+    (2, "cACompromise"),
+    (3, "affiliationChanged"),
+    (4, "superseded"),
+    (5, "cessationOfOperation"),
+    (6, "certificateHold"),
+    (8, "removeFromCRL"),
+    (9, "privilegeWithdrawn"),
+    (10, "aACompromise"),
+)
+
+def _reason_name(reason):
+    code = int(reason)
+    for number, name in REVOCATION_REASONS:
+        if number == code:
+            return name
+    return None
+
+def _revocation_failure(reason, error):
+    """Short revocation error. The problem detail lists the codes the CA allows."""
+    body = getattr(error, "body", None)
+    problem = detail = ""
+    if isinstance(body, dict):
+        problem = str(body.get("type") or "")
+        detail = str(body.get("detail") or "")
+    if reason is None:
+        head = "Revocation failed"
+    else:
+        name = _reason_name(reason)
+        head = "Revocation failed for reason {0} ({1})".format(int(reason), name or int(reason))
+    parts = [head]
+    if problem:
+        parts.append(problem)
+    if detail:
+        parts.append(detail)
+    if len(parts) == 1:
+        parts.append("the CA rejected the request")
+    return ": ".join(parts)
+
 def revoke_cert(account_key, certificate, directory_url=DEFAULT_DIRECTORY_URL, reason=None):
     """Revoke a PEM certificate with the ACME account key (RFC 8555 section 7.6)."""
     directory, _, send = _open_account(account_key, directory_url)
@@ -326,8 +394,18 @@ def revoke_cert(account_key, certificate, directory_url=DEFAULT_DIRECTORY_URL, r
     payload = {"certificate": _b64(der)}
     if reason is not None:
         payload["reason"] = int(reason)
-    send(directory["revokeCert"], payload, "Error revoking certificate")
-    LOGGER.info("Revoked %s.", certificate)
+    try:
+        send(directory["revokeCert"], payload, "Error revoking certificate")
+    except ValueError as error:
+        raise ValueError(_revocation_failure(reason, error)) from None
+    if reason is None:
+        LOGGER.info("Revoked %s.", certificate)
+    else:
+        name = _reason_name(reason)
+        if name:
+            LOGGER.info("Revoked %s: %s (%s).", certificate, name, int(reason))
+        else:
+            LOGGER.info("Revoked %s: %s.", certificate, int(reason))
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -352,14 +430,11 @@ def main(argv=None):
     sign_parser.add_argument("--account-key", required=True, help="path to your ACME account private key")
     sign_parser.add_argument("--contact", metavar="CONTACT", default=None, nargs="*", help="Contact details (e.g. mailto:aaa@bbb.com) for your account-key")
     sign_parser.add_argument("--csr", required=True, action="append", help="path to your certificate signing request, can be given multiple times")
-    sign_parser.add_argument("--profile", help="ACME profile name (see 'profiles' command). Optional; server chooses default if omitted.")
+    sign_parser.add_argument("--profile", help="ACME profile name advertised by the directory. Optional; server chooses default if omitted.")
     sign_parser.add_argument("--replaces", help="RFC 9773 CertID applied to every order in this invocation. The Python API also accepts a dict of CSR path to CertID.")
     hookgroup = sign_parser.add_mutually_exclusive_group(required=True)
     hookgroup.add_argument("--dns-hook", help="the hook script to call for DNS-01 type challenges")
     hookgroup.add_argument("--http-hook", help="the hook script to call for HTTP-01 type challenges")
-
-    # === PROFILES ===
-    profiles_parser = subparsers.add_parser("profiles", help="List supported profiles")
 
     # === CERTID (for ARI in control script) ===
     certid_parser = subparsers.add_parser("certid", help="Compute ARI CertID (RFC 9773) from a certificate")
@@ -377,9 +452,7 @@ def main(argv=None):
 
     logging.basicConfig(format='%(message)s', level=logging.ERROR if args.quiet else logging.INFO)
 
-    if args.command == "profiles":
-        list_profiles(args.directory_url)
-    elif args.command == "certid":
+    if args.command == "certid":
         print(get_cert_id(args.certificate))
     elif args.command == "sign":
         challenge_type = "http" if args.http_hook else "dns"

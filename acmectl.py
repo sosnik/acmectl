@@ -427,6 +427,46 @@ def unattended(cfg, workdir, directory_url, dry_run=False):
     if failed:
         sys.exit(1)
 
+def show_info(directory_url, account_path=None, with_account=False):
+    """Print a short summary of one ACME directory. with_account looks up an existing account."""
+    directory = acme_hooked.get_directory(directory_url)
+    meta = directory.get("meta") if isinstance(directory.get("meta"), dict) else {}
+    print("Directory: {0}".format(directory_url))
+    profiles = meta.get("profiles") if isinstance(meta.get("profiles"), dict) else {}
+    print("Profiles: {0}".format(", ".join(str(name) for name in profiles) or "none"))
+    caa = meta.get("caaIdentities")
+    if isinstance(caa, list) and caa:
+        print("CAA: {0}".format(", ".join(str(item) for item in caa)))
+    print("ARI: {0}".format("yes" if directory.get("renewalInfo") else "no"))
+    external = bool(meta.get("externalAccountRequired"))
+    print("External account required: {0}".format("yes" if external else "no"))
+    if external:
+        print("This client does not send an external account binding.")
+    for key in ("subdomainAuthAllowed", "onionCAARequired", "delegation-enabled", "allow-certificate-get"):
+        if meta.get(key) is True:
+            print("{0}: yes".format(key))
+    if meta.get("auto-renewal"):
+        print("auto-renewal: yes")
+    print("Revocation reasons:")
+    for code, name in acme_hooked.REVOCATION_REASONS:
+        print("  {0} {1}".format(code, name))
+    if with_account:
+        show_account(account_path, directory_url)
+
+def show_account(account_path, directory_url):
+    """Print an existing account. A missing key or a missing account is not a failure."""
+    if not account_path or not os.path.isfile(account_path):
+        print("Account key is not present: {0}".format(account_path))
+        return
+    account = acme_hooked.lookup_account(account_path, directory_url)
+    if account is None:
+        print("No account for this key at this directory.")
+        return
+    print("Account: {0}".format(account.get("url") or ""))
+    print("status: {0}".format(account.get("status") or ""))
+    contact = account.get("contact") or []
+    print("contact: {0}".format(", ".join(contact) if contact else "none"))
+
 def show_ari(cert, directory_url):
     data = acme_hooked.get_ari(cert, directory_url)
     window = data.get("suggestedWindow") or {}
@@ -480,8 +520,9 @@ def main(argv=None):
     renew.add_argument("--dry-run", action="store_true", help="print ISSUE, RENEW, or SKIP; do not sign")
     revoke = sub.add_parser("revoke", help="revoke a certificate with the account key")
     revoke.add_argument("certificate", help="path to the PEM certificate")
-    revoke.add_argument("--reason", type=int, help="RFC 5280 reason code")
-    sub.add_parser("profiles", help="list profiles advertised by the directory")
+    revoke.add_argument("--reason", type=int, help="RFC 5280 reason code; see info")
+    info = sub.add_parser("info", help="summarize the selected directory")
+    info.add_argument("--account", action="store_true", help="look up the existing account; does not create one")
     ari = sub.add_parser("ari", help="print the ARI renewal window for a certificate")
     ari.add_argument("certificate", help="path to the PEM certificate")
 
@@ -505,8 +546,9 @@ def main(argv=None):
             unattended(cfg, workdir, directory_url, args.dry_run)
         elif args.command == "revoke":
             acme_hooked.revoke_cert(account_key(cfg, workdir), args.certificate, directory_url, args.reason)
-        elif args.command == "profiles":
-            acme_hooked.list_profiles(directory_url)
+        elif args.command == "info":
+            path = account_key(cfg, workdir) if args.account else None
+            show_info(directory_url, path, args.account)
         elif args.command == "ari":
             show_ari(args.certificate, directory_url)
         else:

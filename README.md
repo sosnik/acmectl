@@ -12,10 +12,13 @@ To be sure, those other clients are more full-featured, but I have been historic
 
 # Features
 * Separate the concerns of interacting with ACME API and responding to challenges (+ my cloudns hook script is provided).
-* Supports HTTP-01 and DNS-01 challenges, allowing for wildcard certificates.
+* Supports HTTP-01 and DNS-01 challenges, allowing for wildcard certificates.  Will support `DNS-PERSIST-01` as soon as that is finalized.  
 * Helper functions to generate keys and CSRs so that you don't have to remember how to do it / check docs every time you spin up a new server.
 * Unattended mode issues any enrolled CSR that has no certificate yet, and renews a certificate when its ARI window is open. When the CA has no renewal window, renewal happens within `RENEW_THRESHOLD` days of expiry.
+  * Supports a mix of hooks/validation methods.
 * WONTFIX: I will assume that people running this script know enough to debug things themselves and won't need strict input validation for commands. 
+* WONTFIX: I have made some attempts at cross-platform support, but only within my environments.  This Just Works(TM) with WSL on Windows and most Linux I run, I won't be doing native OSX / Windows support.  You can run a docker container, I guess.
+
 # Quickstart
 ```Shell
 sudo useradd -m acmectl
@@ -34,13 +37,17 @@ sudo systemctl enable --now acmectl.timer
 ```
 
 # Usage
-Default hooks, the account key, the expiry threshold, and the directory URLs live in `acmectl.conf` beside the script. `--config` selects a different file. An empty `WORKDIR` means the directory that contains the config.
+Clone the repo, edit `acmectl.conf` as needed (pass `--config` to `acmectl` to use a different config location).  Some hook scripts require their own adjacent `<hook>.conf` file, other hook scripts require manual editing.  This process is deliberately not prescriptive, the idea is that the system is self-explanatory and simple enough that it can be tweaked to your environment.  
 
-`quickstart` links each new CSR into `by-hook/` for the daily run. To enroll a certificate you created with `genkey` / `gencsr` / `getone`, link its CSR into `by-hook/dns/` or `by-hook/http/` to use the default hook, or into `by-hook/<dns|http>/<hook-filename>.d/` to select another script from `hooks/<dns|http>/`.
+`acmectl.py` controls `acme_hooked.py`; `acme_hooked.py` is an ACMEv2 client which calls hook scripts to answer validation challenges.  Hooks live in the `hooks/<challenge-type>/` directory.  Optionally, some hooks MAY use an adjacent `<hookname>.conf` file to avoid checking credentials into version control, but you are welcome to integrate your hook scripts with whatever secrets manager your heart desires.  
 
-The current certificate for `certs/example.rsa.csr` is `certs/example.rsa.crt`. A hook that writes the PEM beside the CSR path is also recognized.
+The `certs/` directory holds private keys, CSRs, signed certificates, backups of signed certificates and `.san` files.  All files relating to one certificate pair MUST use a common base name.  Therefore, `certs/example.san` contains the 'Subject Alt Names' which will be used to generate the CSR `certs/example.<rsa|ecdsa|.csr` from the `certs/example.<rsa|ecdsa.key` private key.  The base name may be arbitrary but it is a good idea to be descriptive.  
 
-Subject Alternate Name files end with `.san` and live in `certs/`. A bare line is a DNS name. `DNS:` and `IP:` are explicit. Wildcards are DNS names. [RFC 8738](https://www.rfc-editor.org/rfc/rfc8738) uses an `ip` identifier and HTTP-01. DNS-01 cannot validate an address. Let's Encrypt also requires its `shortlived` profile for an IP certificate. That profile is not sent to any other directory.
+A CSR SHOULD be linked from `certs/` to `by-hook/<type>/` (default hook) or `by-hook/<type>/<name>.d/` (specific hook name) for challenge type selection by the control script.  
+
+The `.san` file contains a list of DNS or IP address identifiers, one per line, that are used to build the 'Subject Alternate Name' field of the CSR.  This is a convenience measure adapted from the upstream `acme-tiny` README so that the operator does not need to remember how to use `openssl` to issue certificate signing requests.  Technically speaking, it is possible to generate ACME certificates with a single Common Name instead of a list of Subject Alternate Names.  However, realistically, almost all certificates will use multiple names (if only because you want to use `www.example.com` and `example.com` on the same certificate) so the workflow revolves around the SAN, not the CN.
+
+The `DNS:` prefix is optional; a bare line with no prefix is assumed to be a DNS name.  An `IP:` prefix is required for IPv4 and IPv6 addresses.
 
 `example.san`:
 
@@ -52,25 +59,29 @@ IP:192.0.2.1
 
 ```
 
+> [!NOTE]  
+> Note regarding Let's Encrypt and IP address certificates:
+> * Let's Encrypt now issues IP address certificates.  However
+> * These certificates use the `shortlived` profile, which means they are only valid for less than six days (and should be renewed accordingly; test your pipeline).
+> * Per the RFC, IP addresses are validated by talking to the server listening on that IP address, not DNS.  So you can't issue IP address certificates for private IP addresses or on systems without internet access.  
+
+Some brief command explanations (use `--help` for more): 
+
 ```Shell
-acmectl.py quickstart
-acmectl.py genkey NAME [--mode rsa|ecdsa|both]
-acmectl.py gencsr NAME
-acmectl.py getone NAME (--dns [SCRIPT] | --http [SCRIPT])
-acmectl.py unattended [--dry-run]
-acmectl.py revoke CERT [--reason N]
-acmectl.py ari CERT
-acmectl.py profiles
+acmectl.py quickstart # Interactive quickstart akin to ssh-keygen, will generate missing certificates for you
+acmectl.py genkey NAME [--mode rsa|ecdsa|both] # This can be used to generate an ACME account key, not just TLS keys
+acmectl.py gencsr NAME # Generate CSRs for either or both RSA and ECDSA private keys corresponding to the NAME by using the identifiers in NAME.san
+acmectl.py getone NAME (--dns [SCRIPT] | --http [SCRIPT]) # The [SCRIPT] is optional so long as a default hook script is defined in acmectl.conf
+acmectl.py unattended [--dry-run] # Will attempt to check renewal for (and renew) all enrolled CSRs.  --dry-run will report on the action (skip/renew/issue) without actually doing it.   
+acmectl.py revoke CERT [--reason N] # Revoke a certificate
+acmectl.py ari CERT # Query ARI info 
+acmectl.py info [--account] # 'At a glance' info about the relevant ACMEv2 directory, plus summary of the revocation reason codes, plus your ACME account info with --account 
 ```
 
-`getone NAME --dns` uses `DNS_HOOK`. Put the name before the hook flag. `--dry-run` prints `ISSUE`, `RENEW`, or `SKIP` and does not sign. `-t` uses the Let's Encrypt staging directory. `-e` selects another directory named in the config (`LE_PROD`, `LE_STAGING`, `BUYPASS`, `ZEROSSL`, `SECTIGO`).
+Keep in mind that `NAME` must precede `--dns` (or `--http`) so that the hook path does not swallow the `NAME`.  Use `-t` to hit the Let's Encrypt staging directory. `-e` selects another directory named in the config (`LE_PROD`, `LE_STAGING`, `BUYPASS`, `ZEROSSL`, `SECTIGO`).  
 
-The timer runs `unattended` once a day. A certificate inside its ARI window is renewed. If the CA has no renewal window, a certificate within `RENEW_THRESHOLD` days of expiry is renewed. Anything else is left alone. A CSR with no certificate yet is issued.
+The included systemd timer runs `unattended` once a day. A certificate inside its ARI window is renewed. If the CA has no renewal window, a certificate within `RENEW_THRESHOLD` days of expiry is renewed. Anything else is left alone. A CSR with no certificate yet is issued.  Think about how you will reload your nginx/web server relying on the re-issued certificate.  
 
 # Testing with Pebble
 
-Pebble accepts an `ip` identifier. Its HTTP-01 check requests `http://<address>:<httpPort>/.well-known/acme-challenge/<token>` and, when that address is already an IP, dials it directly. TLS-ALPN-01 has its own IP path. DNS-01 still treats the value as a hostname, which RFC 8738 does not allow for an address.
-
-Get Pebble by cloning `https://github.com/letsencrypt/pebble` or by downloading a release archive and unpacking it. From that directory, `docker compose up` starts Pebble and `pebble-challtestsrv`. Add an endpoint for `https://localhost:14000/dir` and select it with `-e`. Put an address Pebble can dial in the CSR, such as `127.0.0.1`, and serve the token on Pebble's HTTP port (5002 in the stock compose file). `pebble-challtestsrv`'s management API on port 8055 can install that token, so the test does not need a public HTTP listener.
-
- 
+See `tests/pebble/README.md`.  Note that current tests are confined to IP address certificate issuance.  Refer `TODO.MD`.  
