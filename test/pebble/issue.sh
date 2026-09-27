@@ -55,10 +55,15 @@ openssl req -new -sha256 \
   -addext "subjectAltName = IP:${ACMECTL_IP}" \
   -out "$WORK/certs/ip1.rsa.csr"
 
-# Win32 openssl on MSYS prints CRLF, and _identifiers only matches a SAN
-# line that ends in LF. Prefer the MSYS openssl for this process only.
+# UCRT "req -text" ends the SAN header in \r\n. _identifiers matches
+# "X509v3 Subject Alternative Name: " only when \n is next, so the CR
+# drops the block before the value is read. MSYS openssl prints LF.
 client_path=$PATH
-if [[ -n ${MSYSTEM:-} && -x /usr/bin/openssl ]]; then
+if [[ -n ${MSYSTEM:-} ]]; then
+  if [[ ! -x /usr/bin/openssl ]]; then
+    printf '%s\n' "refusing MSYS getone without /usr/bin/openssl: UCRT openssl req -text is CRLF and _identifiers drops the SAN" >&2
+    exit 1
+  fi
   client_path="/usr/bin:${PATH}"
 fi
 PATH="$client_path" SSL_CERT_FILE="$WORK/pebble.minica.pem" "$PY" "$REPO/acmectl.py" \

@@ -6,7 +6,7 @@
 
 - bash
 - Docker Engine and Docker Compose v2 (`docker compose`, not the `docker-compose` binary), with the daemon running
-- `openssl` and `curl` on the host
+- `openssl` and `curl` on the host. On MSYS, `getone` is started with `PATH="/usr/bin:$PATH"` and the script exits if `/usr/bin/openssl` is missing. UCRT `openssl req -text` prints CRLF. `_identifiers` matches the SAN block only when `X509v3 Subject Alternative Name: ` is followed immediately by `\n`, so that CR drops the SAN. A normal `getone` on this machine, using the UCRT `openssl` on `PATH`, fails that way. CRLF tolerance belongs in the client and is not part of this test. A green run does not show that the `openssl` on `PATH` can issue the IP certificate. Linux `openssl` already prints LF, and `issue.sh` does not change `PATH` there.
 - Python: `/usr/bin/python3` on MSYS (CPython, `sys.platform == cygwin`). On Linux, `python3`. `run.sh` exits before `compose up` if the interpreter it selected reports `sys.platform == win32`. The UCRT `python3` on `PATH` is that interpreter on MSYS and is not used. The same interpreter runs the directory probe and `getone`: it can spawn the `#!/usr/bin/env bash` hook and open a POSIX `SSL_CERT_FILE`. A Win32 interpreter does neither.
 
 The images are `ghcr.io/letsencrypt/pebble` and `ghcr.io/letsencrypt/pebble-challtestsrv`, tag `2.10.1`, digest-pinned in `docker-compose.yml`. They are public. No client image is built.
@@ -48,12 +48,12 @@ The host check does not prove the bridge route. If the VA cannot dial `10.87.64.
 `issue.sh` runs:
 
 ```text
-SSL_CERT_FILE=$WORK/pebble.minica.pem \
+PATH="/usr/bin:$PATH" SSL_CERT_FILE=$WORK/pebble.minica.pem \
   $PY acmectl.py --config $WORK/acmectl.conf -e PEBBLE \
   getone ip1 --http $WORK/http01-challtestsrv.sh --profile shortlived
 ```
 
-The generated config sets `WORKDIR` to that work directory, leaves `PROFILE` empty, and still defines `LE_PROD` and `LE_STAGING`. The directory URL is `https://127.0.0.1:${ACMECTL_DIR_PORT}/dir`. There is no `-t`. `SSL_CERT_FILE` is set only on that Python process, so a later `openssl verify` does not trust minica.
+On MSYS, `issue.sh` sets that `PATH` for this process only, so `getone` runs `/usr/bin/openssl` instead of UCRT `openssl`. On Linux it does not set `PATH`. The generated config sets `WORKDIR` to that work directory, leaves `PROFILE` empty, and still defines `LE_PROD` and `LE_STAGING`. The directory URL is `https://127.0.0.1:${ACMECTL_DIR_PORT}/dir`. There is no `-t`. `SSL_CERT_FILE` is set only on that Python process, so a later `openssl verify` does not trust minica.
 
 The run fails unless all of these hold:
 
